@@ -40,23 +40,21 @@ button:hover{ background:#111; }
 button:disabled{ opacity:.4; cursor:not-allowed; }
 
 .list { list-style:none; padding:0; margin:0; overflow:auto; }
-.list li { padding:6px 0; border-bottom:1px solid var(--line); }
+.list li { display:flex; align-items:center; gap:8px; padding:6px 0; border-bottom:1px solid var(--line); }
 .list li:last-child { border-bottom:0; }
-
+.picon { width:16px; height:16px; image-rendering: pixelated; border:1px solid var(--line); background:#000; }
+.pname { flex:1; }
 .muted { color:var(--muted); }
 .ok, .tag { color:#fff; border:1px solid var(--muted); padding:1px 4px; margin-left:8px; font-size:11px; }
 .tag.host { color:#7aff7a; border-color:#2d2d2d; }
-.dot { display:inline-block; width:10px; height:10px; border:1px solid var(--line); margin-right:6px; vertical-align:middle; }
 
 .avatar-preview { display:flex; justify-content:center; align-items:center; height:200px; background:#000; border:1px solid var(--line); }
-.avatar-row { display:flex; gap:8px; flex-wrap:wrap; }
-.avatar { width:18px; height:18px; border:1px solid var(--muted); }
-.avatar.is-selected { outline:1px solid #fff; outline-offset:2px; }
-.avatar[disabled] { opacity:.35; border-color:#3a3a3a; cursor:not-allowed; }
 
 .startbar { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-top:12px; border:1px solid var(--line); padding:10px 12px; }
 
 .log { background:#000; border:1px solid var(--line); min-height:220px; overflow:auto; font-size:13px; padding:10px; }
+.log .rowline { display:flex; align-items:center; gap:8px; padding:3px 0; }
+.log .rowline img { width:16px; height:16px; image-rendering:pixelated; border:1px solid var(--line); background:#000; }
 
 .hidden { display:none !important; }
 
@@ -78,6 +76,9 @@ button:disabled{ opacity:.4; cursor:not-allowed; }
 .thead { background:#0e0e0e; color:#cfcfcf; }
 .t-right { text-align:right; }
 
+.trow .namecell { display:flex; align-items:center; gap:8px; }
+
+/* Final board extras */
 .board-extras { display:grid; grid-template-columns: 1fr 200px; gap:16px; width:min(900px,100%); margin-top:12px; }
 .board-chat .log { min-height:160px; }
 .board-actions { display:flex; flex-direction:column; gap:8px; align-items:flex-end; }

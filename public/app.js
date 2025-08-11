@@ -11,7 +11,7 @@ function showPhaseSections(phase) {
 // ---------- Socket ----------
 const socket = io();
 
-// ---------- Palette (indexes known by server) ----------
+// ---------- Palette ----------
 const palette = ['#2d3e50','#365e2b','#6f3d20','#2b2b2b','#6b59b1','#d4458c','#e4b737','#2d5fab','#7a3f75','#7b1c28'];
 const INFECT_COLOR = '#00c83a';
 
@@ -19,14 +19,12 @@ const INFECT_COLOR = '#00c83a';
 let state = { you:null, host:false, phase:'LOBBY', round:0, totalRounds:0, players:[], world:{w:1600,h:900}, countdownEndsAt:null, gameEndsAt:null, boardEndsAt:null };
 
 // ---------- Sections & Refs ----------
-const appEl = el('app');
 const lobby  = el('lobby');
 const reveal = el('reveal');
 const game   = el('game');
 const board  = el('board');
 
 const avatarCanvas = el('avatarCanvas'); const ac = avatarCanvas?.getContext('2d');
-const avatarRow = el('avatarRow');
 const nameInput = el('nameInput');
 const readyChk = el('readyChk');
 const playerList = el('playerList');
@@ -47,65 +45,58 @@ const roundText = el('roundText'); const gameTimer = el('gameTimer'); const infe
 
 const boardRound = el('boardRound'); const boardRows = el('boardRows');
 const boardNext = el('boardNext'); const boardCountdown = el('boardCountdown');
-const finalExtras = el('finalExtras'); const boardChatLog = el('boardChatLog'); const boardChatInput = el('boardChatInput'); const boardChatSend = el('boardChatSend'); const playAgainBtn = el('playAgainBtn');
+const finalExtras = el('finalExtras');
+const boardChatLog = el('boardChatLog'); const boardChatInput = el('boardChatInput'); const boardChatSend = el('boardChatSend');
+const playAgainBtn = el('playAgainBtn');
 
 // ---------- Audio ----------
 let actx, unlocked=false;
 addEventListener('pointerdown', ()=>{ if(!unlocked){ actx = new (window.AudioContext||window.webkitAudioContext)(); unlocked=true; } }, { once:true });
 const beep = (type='click')=>{
-  if (!unlocked) return; const now = actx.currentTime;
-  const o = actx.createOscillator(); const g = actx.createGain(); o.type='square';
-  const tones = { click:660, select:760, ready:520, start:880, tick:440, infect:180, score:620, error:200 };
+  if (!unlocked) return;
+  const now = actx.currentTime, o = actx.createOscillator(), g = actx.createGain();
+  o.type='square'; const tones = { click:660, select:760, ready:520, start:880, tick:440, infect:180, score:620, error:200 };
   o.frequency.value = tones[type] || 660;
   g.gain.setValueAtTime(.001, now); g.gain.exponentialRampToValueAtTime(.2, now+.01); g.gain.exponentialRampToValueAtTime(.001, now+.12);
   o.connect(g); g.connect(actx.destination); o.start(now); o.stop(now+.13);
 };
 
-// ---------- Avatar (two big eyes) ----------
-let selectedAvatar = 5;
-function drawAvatar(ctx, color, scale){
+// ---------- Avatar preview (bigger, with eyes) ----------
+let myAvatarIdx = 5;
+function drawAvatarPreview(color){
+  if (!ac) return;
+  const ctx = ac; const scale = 14;
   const px=(x,y,w,h,c)=>{ ctx.fillStyle=c; ctx.fillRect(x*scale,y*scale,w*scale,h*scale); };
   ctx.clearRect(0,0,ctx.canvas.width,ctx.canvas.height);
-  px(2,2,7,6,color);          // bigger body
-  px(2,8,7,1,'#fff');         // feet/base
+  px(2,2,7,6,color);          // body
+  px(2,8,7,1,'#fff');         // feet
   px(3,4,2,2,'#fff'); px(6,4,2,2,'#fff'); // eyes
   px(4,5,1,1,'#000'); px(7,5,1,1,'#000'); // pupils
   px(9,3,1,1,'#ffd27b');      // hat pixel
 }
-if (ac) drawAvatar(ac, palette[selectedAvatar], 14);
 
-function renderPalette(){
-  if (!avatarRow) return;
-  avatarRow.innerHTML = '';
-  const usedByOthers = new Set(state.players.filter(p=>p.id!==state.you).map(p=>p.avatar|0));
-  palette.forEach((c, i)=>{
-    const b = document.createElement('button');
-    b.className = 'avatar' + (i===selectedAvatar ? ' is-selected' : '');
-    b.style.background = c;
-    if (usedByOthers.has(i)) b.setAttribute('disabled','');
-    b.onclick = ()=>{
-      if (usedByOthers.has(i)) { beep('error'); return; }
-      selectedAvatar = i;
-      if (ac) drawAvatar(ac, palette[selectedAvatar], 14);
-      socket.emit('set_avatar', { avatar: selectedAvatar });
-      beep('select');
-      // update highlight
-      renderPalette();
-    };
-    avatarRow.appendChild(b);
-  });
+// ---------- Tiny sprite for UI rows (data URL cache) ----------
+const thumbCache = new Map();
+function makeThumb(color){
+  if (thumbCache.has(color)) return thumbCache.get(color);
+  const c = document.createElement('canvas'); c.width=18; c.height=18; const x=c.getContext('2d'); x.imageSmoothingEnabled=false;
+  // mini body
+  x.fillStyle=color; x.fillRect(4,4,10,10);
+  x.fillStyle='#fff'; x.fillRect(6,7,3,3); x.fillRect(11,7,3,3);
+  x.fillStyle='#000'; x.fillRect(7,8,1,1); x.fillRect(12,8,1,1);
+  const url = c.toDataURL(); thumbCache.set(color, url); return url;
 }
 
-// ---------- Lobby input ----------
+// ---------- Inputs ----------
 nameInput?.addEventListener('change', ()=>{ socket.emit('set_name', { name: nameInput.value.trim() }); beep('click'); });
 readyChk?.addEventListener('change', ()=>{ socket.emit('set_ready', { ready: readyChk.checked }); beep('ready'); });
 chatSend?.addEventListener('click', sendChat);
 chatInput?.addEventListener('keydown', e=>{ if (e.key==='Enter') sendChat(); });
 function sendChat(){ const t=chatInput.value.trim(); if(!t) return; socket.emit('chat', { message:t }); chatInput.value=''; beep('click'); }
 
+const sendBoardChat=()=>{ const t=boardChatInput?.value.trim(); if(!t) return; socket.emit('chat',{ message:t }); boardChatInput.value=''; beep('click'); };
 boardChatSend?.addEventListener('click', sendBoardChat);
 boardChatInput?.addEventListener('keydown', e=>{ if (e.key==='Enter') sendBoardChat(); });
-function sendBoardChat(){ const t=boardChatInput.value.trim(); if(!t) return; socket.emit('chat', { message:t }); boardChatInput.value=''; beep('click'); }
 
 startBtn?.addEventListener('click', ()=>{ socket.emit('start_game'); beep('start'); });
 playAgainBtn?.addEventListener('click', ()=>{ socket.emit('restart_series'); beep('start'); });
@@ -125,8 +116,8 @@ function sendDir(){
 socket.on('room_joined', ({ you, host })=>{ state.you=you; state.host=!!host; });
 
 let countdownTimer=null, boardTimer=null;
-function stopCountdown(){ if(countdownTimer){ clearInterval(countdownTimer); countdownTimer=null; } }
-function stopBoardTimer(){ if(boardTimer){ clearInterval(boardTimer); boardTimer=null; } }
+const stopCountdown=()=>{ if(countdownTimer){ clearInterval(countdownTimer); countdownTimer=null; } };
+const stopBoardTimer=()=>{ if(boardTimer){ clearInterval(boardTimer); boardTimer=null; } };
 
 socket.on('room_state', (payload)=>{
   const { phase, round, totalRounds, players, countdownEndsAt, gameEndsAt, boardEndsAt, board:boardData, world } = payload;
@@ -135,25 +126,25 @@ socket.on('room_state', (payload)=>{
   state.players=players||[]; state.world=world||state.world;
   state.countdownEndsAt=countdownEndsAt||null; state.gameEndsAt=gameEndsAt||null; state.boardEndsAt=boardEndsAt??null;
 
-  // set your selected avatar from server (in case auto-assigned)
+  // update my avatar colour & preview
   const me = state.players.find(p=>p.id===state.you);
-  if (me && selectedAvatar!== (me.avatar|0)){ selectedAvatar = me.avatar|0; if (ac) drawAvatar(ac, palette[selectedAvatar], 14); }
+  if (me) { myAvatarIdx = me.avatar|0; drawAvatarPreview(palette[myAvatarIdx]); }
 
-  // sections + fullscreen
   showPhaseSections(phase);
 
   // LOBBY
   if (phase==='LOBBY' && playerList){
-    // palette row (apply "used" + selected outline)
-    renderPalette();
-
     playerList.innerHTML='';
     const readyNum = state.players.filter(p=>p.ready).length;
     if (readyCount) readyCount.textContent = `${readyNum}/${state.players.length} players ready`;
     if (startBtn) startBtn.disabled = !(state.host && state.players.length>=3 && readyNum===state.players.length);
     state.players.forEach(p=>{
       const li=document.createElement('li');
-      li.innerHTML=`<span class="dot" style="background:${palette[p.avatar||0]}"></span> ${p.name} ${p.id===state.you?'<span class="muted">(you)</span>':''} ${p.id===state.you&&state.host?'<span class="tag host">HOST</span>':''} ${p.ready?'<span class="ok">READY</span>':''}`;
+      const img = document.createElement('img'); img.className='picon'; img.src = makeThumb(palette[p.avatar||0]); img.alt='';
+      const name = document.createElement('span'); name.className='pname'; name.textContent = p.name + (p.id===state.you?' (you)':'');
+      li.appendChild(img); li.appendChild(name);
+      if (p.id===state.you && state.host){ const tag=document.createElement('span'); tag.className='tag host'; tag.textContent='HOST'; li.appendChild(tag); }
+      if (p.ready){ const ok=document.createElement('span'); ok.className='ok'; ok.textContent='READY'; li.appendChild(ok); }
       playerList.appendChild(li);
     });
   }
@@ -171,8 +162,11 @@ socket.on('room_state', (payload)=>{
     boardRows.innerHTML='';
     (boardData||[]).forEach(row=>{
       const div=document.createElement('div'); div.className='trow';
-      div.innerHTML=`
-        <div><span class="dot" style="background:${palette[row.avatar||0]}"></span> ${row.name}</div>
+      const cell=document.createElement('div'); cell.className='namecell';
+      const img=document.createElement('img'); img.className='picon'; img.src=makeThumb(palette[row.avatar||0]); cell.appendChild(img);
+      const span=document.createElement('span'); span.textContent=row.name; cell.appendChild(span);
+      div.appendChild(cell);
+      div.innerHTML += `
         <div class="t-right">${row.survSec}</div>
         <div class="t-right">${row.infections}</div>
         <div class="t-right">${row.bonus}</div>
@@ -181,14 +175,14 @@ socket.on('room_state', (payload)=>{
       boardRows.appendChild(div);
     });
 
-    // Between rounds shows countdown; final shows chat + play again
+    // Between rounds: countdown; Final: chat + play again
     stopBoardTimer();
     const isFinal = !state.boardEndsAt;
     if (isFinal){
-      if (finalExtras) finalExtras.classList.remove('hidden');
-      if (boardNext) boardNext.classList.add('hidden');
+      finalExtras?.classList.remove('hidden');
+      boardNext?.classList.add('hidden');
     } else {
-      if (finalExtras) finalExtras.classList.add('hidden');
+      finalExtras?.classList.add('hidden');
       if (boardNext){
         boardNext.classList.remove('hidden');
         const run=()=>{ const ms=Math.max(0,state.boardEndsAt - Date.now()); const s=Math.ceil(ms/1000); if (boardCountdown) boardCountdown.textContent=s+'s'; };
@@ -201,23 +195,35 @@ socket.on('room_state', (payload)=>{
 
 socket.on('role', ({ role })=>{
   const rctx = revealAvatar?.getContext('2d');
-  if (rctx) drawAvatar(rctx, palette[selectedAvatar], 12);
+  if (rctx) {
+    // preview uses your assigned colour
+    const scale = 12, ctx=rctx;
+    const px=(x,y,w,h,c)=>{ ctx.fillStyle=c; ctx.fillRect(x*scale,y*scale,w*scale,h*scale); };
+    ctx.clearRect(0,0,ctx.canvas.width,ctx.canvas.height);
+    px(2,2,7,6,palette[myAvatarIdx]); px(2,8,7,1,'#fff');
+    px(3,4,2,2,'#fff'); px(6,4,2,2,'#fff'); px(4,5,1,1,'#000'); px(7,5,1,1,'#000'); px(9,3,1,1,'#ffd27b');
+  }
   if (revealTitle && revealText){
     if (role==='PATIENT_ZERO'){ revealTitle.textContent='You are patient Zero.'; revealText.textContent='Try and get close to players to infect them.'; }
     else { revealTitle.textContent='You are a citizen.'; revealText.textContent='Stay away from infected players.'; }
   }
 });
 
-socket.on('chat_message', ({ from, text })=>{
-  // mirror chat to lobby and board logs if visible
-  if (chatLog){ const d=document.createElement('div'); d.textContent=`${from}: ${text}`; chatLog.appendChild(d); chatLog.scrollTop=chatLog.scrollHeight; }
-  if (boardChatLog){ const d=document.createElement('div'); d.textContent=`${from}: ${text}`; boardChatLog.appendChild(d); boardChatLog.scrollTop=boardChatLog.scrollHeight; }
+socket.on('chat_message', ({ from, avatar, text })=>{
+  const url = makeThumb(palette[avatar||0]);
+  const row = document.createElement('div'); row.className='rowline';
+  const img = document.createElement('img'); img.src=url; img.alt=''; row.appendChild(img);
+  const span = document.createElement('span'); span.textContent = `${from}: ${text}`; row.appendChild(span);
+  if (chatLog){ chatLog.appendChild(row.cloneNode(true)); chatLog.scrollTop = chatLog.scrollHeight; }
+  if (boardChatLog){ boardChatLog.appendChild(row); boardChatLog.scrollTop = boardChatLog.scrollHeight; }
 });
 
 socket.on('error_message', (m)=>{ console.warn('[server]', m); beep('error'); });
 
 // ---------- Game drawing ----------
-const lastPos = new Map(); let animTime=0;
+const lastPos = new Map(); let animTime=0, stepPhase=0;
+
+addEventListener('keydown', e=>{ if(state.phase==='GAME' && (e.key===' '||e.code==='Space')) e.preventDefault(); }, { passive:false });
 
 socket.on('game_state', ({ phase, positions, round, totalRounds, gameEndsAt })=>{
   if (phase!=='GAME' || !gctx) return;
@@ -239,22 +245,18 @@ function drawGame(positions){
   gctx.strokeStyle='#fff'; gctx.lineWidth=2; gctx.strokeRect(6,6,w-12,h-12);
 
   // timing
-  const now=performance.now(); const dt=(now-animTime)||16; animTime=now;
+  const now=performance.now(); const dt=(now-animTime)||16; animTime=now; stepPhase += dt*0.02;
 
-  // split
   const infected = positions.filter(p=>p.infected);
   const healthy  = positions.filter(p=>!p.infected);
 
   positions.forEach(p=>{
-    // infected proximity square (kept subtle)
-    if (p.infected){ gctx.fillStyle='rgba(0,255,0,0.08)'; gctx.fillRect(p.x-36,p.y-36,72,72); gctx.strokeStyle='rgba(0,255,0,0.25)'; gctx.strokeRect(p.x-36,p.y-36,72,72); }
-
     const last=lastPos.get(p.id)||{x:p.x,y:p.y};
     const moving=(Math.hypot(p.x-last.x,p.y-last.y)>0.5);
     lastPos.set(p.id,{x:p.x,y:p.y});
 
     // eye target
-    let tx=p.x, ty=p.y-12;
+    let tx=p.x, ty=p.y-14;
     const pool = p.infected ? healthy : infected;
     if (pool.length){
       let best=null, d2=1e9;
@@ -263,42 +265,54 @@ function drawGame(positions){
     }
 
     const baseColor = p.infected ? INFECT_COLOR : palette[p.avatar||0];
-    drawMiniSprite(gctx, p.x, p.y, baseColor, moving, dt, tx, ty);
-
+    drawMiniSprite(gctx, p.x, p.y, baseColor, p.infected, moving, dt, tx, ty);
     if (p.id===state.you){
       gctx.fillStyle='#bbb'; gctx.font='12px ui-monospace, monospace'; gctx.textAlign='center';
-      gctx.fillText('you', Math.round(p.x), Math.round(p.y)+34);
+      gctx.fillText('you', Math.round(p.x), Math.round(p.y)+38);
     }
   });
 }
 
-// bigger sprite (about 32px), pupils track target, feet alternate
-let stepPhase=0;
-function drawMiniSprite(ctx, cx, cy, color, moving, dt, tx, ty){
-  stepPhase += (moving ? dt*0.02 : dt*0.006);
-  const footOff = moving ? (Math.sin(stepPhase)*1) : 0;
-
-  const x0 = Math.round(cx) - 16;
-  const y0 = Math.round(cy) - 16;
-
+// Bigger sprite (~36px total), with arms:
+// - Zombies: arms straight out forward.
+// - Citizens: flailing side arms (alternate with stepPhase).
+function drawMiniSprite(ctx, cx, cy, color, infected, moving, dt, tx, ty){
+  const x0 = Math.round(cx) - 18;
+  const y0 = Math.round(cy) - 18;
   ctx.imageSmoothingEnabled = false;
 
-  // body (bigger)
-  ctx.fillStyle=color; ctx.fillRect(x0+6, y0+6, 20, 20);
+  // body (24x24)
+  ctx.fillStyle=color; ctx.fillRect(x0+6, y0+8, 24, 24);
 
-  // eyes (white rectangles 5x5)
-  ctx.fillStyle='#fff'; ctx.fillRect(x0+9, y0+10, 5, 5); ctx.fillRect(x0+18, y0+10, 5, 5);
+  // arms
+  ctx.fillStyle=color;
+  if (infected){
+    // forward arms (two bars in front/top)
+    ctx.fillRect(x0+10, y0+4, 8, 3);
+    ctx.fillRect(x0+22, y0+4, 8, 3);
+  } else {
+    // flailing side arms
+    const amp = moving ? 4 : 1;
+    const yL = y0+16 + Math.round(Math.sin(stepPhase)*amp);
+    const yR = y0+16 + Math.round(Math.sin(stepPhase+Math.PI)*amp);
+    ctx.fillRect(x0+2,  yL, 6, 3);  // left arm
+    ctx.fillRect(x0+32, yR, 6, 3);  // right arm
+  }
 
-  // pupils offset toward target (max 1px)
-  const dx = Math.max(-1, Math.min(1, Math.round((tx - cx)/24)));
-  const dy = Math.max(-1, Math.min(1, Math.round((ty - cy)/24)));
-  ctx.fillStyle='#000'; ctx.fillRect(x0+11+dx, y0+12+dy, 3, 3); ctx.fillRect(x0+20+dx, y0+12+dy, 3, 3);
+  // eyes (6x6)
+  ctx.fillStyle='#fff'; ctx.fillRect(x0+11, y0+16, 6, 6); ctx.fillRect(x0+23, y0+16, 6, 6);
+
+  // pupils with slight offset toward target (max 2px)
+  const dx = Math.max(-2, Math.min(2, Math.round((tx - cx)/18)));
+  const dy = Math.max(-2, Math.min(2, Math.round((ty - cy)/18)));
+  ctx.fillStyle='#000'; ctx.fillRect(x0+13+dx, y0+18+dy, 3, 3); ctx.fillRect(x0+25+dx, y0+18+dy, 3, 3);
 
   // hat pixel
-  ctx.fillStyle='#ffd27b'; ctx.fillRect(x0+26, y0+6, 3, 3);
+  ctx.fillStyle='#ffd27b'; ctx.fillRect(x0+30, y0+8, 3, 3);
 
-  // feet/base (alternate)
+  // feet/base (alternate tiny bounce when moving)
+  const footOff = moving ? (Math.sin(stepPhase)*1) : 0;
   ctx.fillStyle='#fff';
-  ctx.fillRect(x0+8,  y0+26 + (footOff>0?1:0), 8, 3);
-  ctx.fillRect(x0+18, y0+26 + (footOff<0?1:0), 8, 3);
+  ctx.fillRect(x0+10, y0+32 + (footOff>0?1:0), 8, 3);
+  ctx.fillRect(x0+22, y0+32 + (footOff<0?1:0), 8, 3);
 }

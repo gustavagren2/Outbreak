@@ -1,7 +1,7 @@
 {
   "name": "outbreak-mvp",
-  "version": "1.4.0",
-  "description": "Monochrome multiplayer Outbreak — single shared room, unique colours, fullscreen play, instant infection, rotation P0 twice, leaderboard with chat + replay.",
+  "version": "1.5.0",
+  "description": "Monochrome multiplayer Outbreak — single shared room, unique colours, fullscreen, instant infection, P0 rotation, arms animation, final chat & replay.",
   "type": "module",
   "main": "server.js",
   "scripts": { "start": "node server.js" },

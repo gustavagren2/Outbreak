@@ -4,7 +4,7 @@
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>OUTBREAK</title>
-  <link rel="stylesheet" href="/style.css?v=8"/>
+  <link rel="stylesheet" href="/style.css?v=9"/>
 </head>
 <body>
   <div class="app" id="app">
@@ -12,13 +12,8 @@
     <section id="lobby" class="grid-2 full">
       <div class="panel column">
         <div class="avatar-preview">
-          <canvas id="avatarCanvas" width="160" height="160"></canvas>
+          <canvas id="avatarCanvas" width="160" height="160" title="Your character"></canvas>
         </div>
-
-        <label class="field">
-          <span>Select avatar</span>
-          <div id="avatarRow" class="avatar-row"></div>
-        </label>
 
         <label class="field">
           <span>Select name</span>
@@ -81,7 +76,6 @@
         <div id="boardRows" class="tbody"></div>
       </div>
 
-      <!-- When final leaderboard: show chat + play again -->
       <div id="finalExtras" class="board-extras hidden">
         <div class="board-chat">
           <div id="boardChatLog" class="log grow"></div>
@@ -101,6 +95,6 @@
   </div>
 
   <script src="/socket.io/socket.io.js"></script>
-  <script src="/app.js?v=8"></script>
+  <script src="/app.js?v=9"></script>
 </body>
 </html>
