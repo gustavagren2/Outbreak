@@ -20,8 +20,6 @@ server.listen(PORT, () => console.log('listening on :' + PORT));
 /* ---------------------------- Game State ---------------------------- */
 const PHASE = { LOBBY:'LOBBY', COUNTDOWN:'COUNTDOWN', GAME:'GAME', LEADERBOARD:'LEADERBOARD' };
 const DEFAULT_CODE = 'ROOM'; // single shared room
-
-// palette indices 0..9 (client knows actual hex values)
 const PALETTE = [0,1,2,3,4,5,6,7,8,9];
 
 const rooms = new Map();
@@ -35,13 +33,18 @@ room = {
   world: { w,h },
   options: {
     speed, contactDist, roundMs, countdownMs, boardMs, minPlayers,
+    minSpawnFromP0,
+    powerups: { spawnIntervalMs, maxOnField, pickupDist, speedMs, speedMul }
     points:{ survivalPerSec, perInfection, p0FullInfectBonus }
   },
   scores: Map<id, { total:number, infections:number, survivalMs:number }>,
   board?: Array,
-  p0Queue: string[]
+  p0Queue: string[],
+  powerups: Array<{id,type,x,y}>,
+  nextPowerSpawn?: number,
+  puSeq?: number
 }
-Player = { id,name,avatar,ready,dir:{x,y},x,y,infected:boolean, round:{survivalMs:number,infections:number,isP0:boolean} }
+Player = { id,name,avatar,ready,dir:{x,y},x,y,infected:boolean, speedUntil:number, round:{survivalMs:number,infections:number,isP0:boolean} }
 */
 
 const clamp = (v,min,max)=> v<min?min:v>max?max:v;
@@ -58,12 +61,20 @@ function ensureDefaultRoom(){
     players: new Map(),
     world: { w: 1600, h: 900 },
     options: {
-      speed: 200,           // px/s
-      contactDist: 22,      // collision distance (slightly bigger chars)
+      speed: 200,           // px/s base
+      contactDist: 22,      // collision distance (bigger chars)
       roundMs: 90_000,
       countdownMs: 10_000,
       boardMs: 6000,
       minPlayers: 3,
+      minSpawnFromP0: 260,  // players won’t spawn closer than this to P0
+      powerups: {
+        spawnIntervalMs: 12_000,
+        maxOnField: 3,
+        pickupDist: 24,
+        speedMs: 5000,
+        speedMul: 1.6
+      },
       points: {
         survivalPerSec: 1,
         perInfection: 25,
@@ -71,7 +82,10 @@ function ensureDefaultRoom(){
       }
     },
     scores: new Map(),
-    p0Queue: []
+    p0Queue: [],
+    powerups: [],
+    nextPowerSpawn: 0,
+    puSeq: 0
   };
   rooms.set(DEFAULT_CODE, room);
   return room;
@@ -128,14 +142,15 @@ function broadcastRoom(room){
 }
 function broadcastGame(room){
   const positions = [...room.players.values()].map(p=>({
-    id:p.id, x:p.x, y:p.y, infected:p.infected, avatar:p.avatar
+    id:p.id, x:p.x, y:p.y, infected:p.infected, avatar:p.avatar, speedUntil:p.speedUntil||0
   }));
   io.to(room.code).emit('game_state', {
     phase: room.phase,
     positions,
     round: room.round,
     totalRounds: room.totalRounds,
-    gameEndsAt: room.gameEndsAt || null
+    gameEndsAt: room.gameEndsAt || null,
+    powerups: room.powerups
   });
 }
 
@@ -167,11 +182,16 @@ function startNextRound(room){
   room.round += 1;
   if (room.round > room.totalRounds) return;
 
+  // clear powerups
+  room.powerups = [];
+  room.puSeq = 0;
+  room.nextPowerSpawn = 0;
+
+  // reset per-round
   for (const p of room.players.values()){
-    const s = randomSpawn(room);
-    p.x = s.x; p.y = s.y;
-    p.dir.x = 0; p.dir.y = 0;
+    p.dir = { x:0, y:0 };
     p.infected = false;
+    p.speedUntil = 0;
     p.round = { survivalMs:0, infections:0, isP0:false };
   }
 
@@ -182,9 +202,23 @@ function startNextRound(room){
     const ids = [...room.players.keys()];
     p0 = ids[(Math.random()*ids.length)|0];
   }
-  if (p0 && room.players.has(p0)){
-    const pz = room.players.get(p0);
-    pz.infected = true; pz.round.isP0 = true;
+
+  // spawn P0 first
+  const pz = room.players.get(p0);
+  const pzSpawn = randomSpawn(room);
+  pz.x = pzSpawn.x; pz.y = pzSpawn.y;
+  pz.infected = true; pz.round.isP0 = true;
+
+  // spawn others, respecting min distance to P0
+  for (const [id, p] of room.players){
+    if (id === p0) continue;
+    let s, tries=0;
+    const minD = room.options.minSpawnFromP0;
+    do {
+      s = randomSpawn(room);
+      tries++;
+    } while (tries<50 && ((s.x-pz.x)*(s.x-pz.x) + (s.y-pz.y)*(s.y-pz.y)) < minD*minD);
+    p.x = s.x; p.y = s.y;
   }
 
   // private role reveal
@@ -208,6 +242,7 @@ function startRoundPlay(room){
 
   if (room.tick) clearInterval(room.tick);
   const dtMs = 50; // 20 Hz
+  room.nextPowerSpawn = Date.now() + 4000; // first spawn after 4s
   room.tick = setInterval(()=> tick(room, dtMs), dtMs);
 
   broadcastRoom(room);
@@ -247,17 +282,31 @@ function endRound(room){
 }
 
 /* --------------------------------- Tick -------------------------------- */
+function spawnPowerup(room){
+  if (room.powerups.length >= room.options.powerups.maxOnField) return;
+  const s = randomSpawn(room);
+  room.powerups.push({ id: ++room.puSeq, type:'speed', x:s.x, y:s.y });
+}
+
 function tick(room, dtMs){
   if (room.phase !== PHASE.GAME) return;
-  const dt = dtMs/1000, speed = room.options.speed;
+  const dt = dtMs/1000, base = room.options.speed;
 
+  // maybe spawn a powerup
+  if (Date.now() >= room.nextPowerSpawn){
+    spawnPowerup(room);
+    room.nextPowerSpawn = Date.now() + room.options.powerups.spawnIntervalMs;
+  }
+
+  // integrate + survival
   for (const p of room.players.values()){
-    p.x = clamp(p.x + p.dir.x * speed * dt, 20, room.world.w-20);
-    p.y = clamp(p.y + p.dir.y * speed * dt, 20, room.world.h-20);
+    const mul = (p.speedUntil && p.speedUntil > Date.now()) ? room.options.powerups.speedMul : 1;
+    p.x = clamp(p.x + p.dir.x * base * mul * dt, 20, room.world.w-20);
+    p.y = clamp(p.y + p.dir.y * base * mul * dt, 20, room.world.h-20);
     if (!p.infected) p.round.survivalMs += dtMs;
   }
 
-  // instant infection on contact (bigger sprites -> bigger contactDist)
+  // instant infection on contact
   const infected = [...room.players.values()].filter(p=>p.infected);
   const healthy  = [...room.players.values()].filter(p=>!p.infected);
 
@@ -271,6 +320,25 @@ function tick(room, dtMs){
       h.infected = true;
       source.round.infections += 1;
       io.to(room.code).emit('system_message', `infect:${h.name}`);
+    }
+  }
+
+  // powerup pickup collisions (anyone can take)
+  for (let i=room.powerups.length-1; i>=0; i--){
+    const pu = room.powerups[i];
+    let pickedBy = null;
+    for (const p of room.players.values()){
+      const dx = pu.x - p.x, dy = pu.y - p.y;
+      if (dx*dx + dy*dy <= room.options.powerups.pickupDist * room.options.powerups.pickupDist){
+        pickedBy = p; break;
+      }
+    }
+    if (pickedBy){
+      room.powerups.splice(i,1);
+      if (pu.type==='speed'){
+        pickedBy.speedUntil = Date.now() + room.options.powerups.speedMs;
+        io.to(room.code).emit('system_message', `power:speed:${pickedBy.name}`);
+      }
     }
   }
 
@@ -291,6 +359,7 @@ io.on('connection', (socket)=>{
   room.players.set(socket.id, {
     id: socket.id, name: 'PLAYER', avatar: avatarIdx, ready: false,
     dir:{x:0,y:0}, x:spawn.x, y:spawn.y, infected:false,
+    speedUntil: 0,
     round:{survivalMs:0,infections:0,isP0:false}
   });
   if (!room.hostId) room.hostId = socket.id;
@@ -304,7 +373,7 @@ io.on('connection', (socket)=>{
     p.name = String(name||'').slice(0,16) || p.name; broadcastRoom(r);
   });
 
-  // colour selection UI was removed; keep handler harmless if ever sent
+  // colour selection removed; keep handler harmless if ever sent
   socket.on('set_avatar', ({ avatar })=>{
     const r = ensureDefaultRoom(); const p = r.players.get(socket.id); if (!p) return;
     const idx = Math.max(0, Math.min(9, avatar|0));
@@ -321,7 +390,7 @@ io.on('connection', (socket)=>{
   socket.on('chat', ({ message })=>{
     const r = ensureDefaultRoom();
     if (!r) return;
-    if (r.phase === PHASE.GAME) return; // keep gameplay clean; lobby/board chat only
+    if (r.phase === PHASE.GAME) return; // chat in lobby/board
     const p = r.players.get(socket.id); if (!p) return;
     io.to(r.code).emit('chat_message', { from:p.name, avatar:p.avatar|0, text:String(message||'').slice(0,300) });
   });

@@ -43,7 +43,7 @@
       </div>
     </section>
 
-    <!-- ROLE REVEAL (in-between) -->
+    <!-- ROLE REVEAL -->
     <section id="reveal" class="center hidden">
       <canvas id="revealAvatar" width="120" height="120"></canvas>
       <h2 id="revealTitle">ROLE</h2>
@@ -54,13 +54,16 @@
 
     <!-- GAME (fullscreen) -->
     <section id="game" class="hidden">
-      <div class="hud top-left"><span id="roundText">Round 1 of 1</span></div>
+      <div class="hud top-left">
+        <span id="roundText">Round 1 of 1</span>
+        <div id="powerHUD" class="small muted"></div>
+      </div>
       <div class="hud top-right"><span id="gameTimer">90</span> Seconds remaining</div>
       <div class="hud bottom-right"><span id="infectCount">0</span> Players infected</div>
       <canvas id="gameCanvas" width="1600" height="900"></canvas>
     </section>
 
-    <!-- LEADERBOARD (between and final) -->
+    <!-- LEADERBOARD -->
     <section id="board" class="center hidden">
       <h2>LEADERBOARD</h2>
       <div id="boardRound" class="muted small">Round summary</div>
@@ -95,6 +98,6 @@
   </div>
 
   <script src="/socket.io/socket.io.js"></script>
-  <script src="/app.js?v=9"></script>
+  <script src="/app.js?v=10"></script>
 </body>
 </html>

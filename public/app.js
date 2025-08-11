@@ -16,38 +16,24 @@ const palette = ['#2d3e50','#365e2b','#6f3d20','#2b2b2b','#6b59b1','#d4458c','#e
 const INFECT_COLOR = '#00c83a';
 
 // ---------- State ----------
-let state = { you:null, host:false, phase:'LOBBY', round:0, totalRounds:0, players:[], world:{w:1600,h:900}, countdownEndsAt:null, gameEndsAt:null, boardEndsAt:null };
+let state = {
+  you:null, host:false, phase:'LOBBY',
+  round:0, totalRounds:0,
+  players:[], world:{w:1600,h:900},
+  countdownEndsAt:null, gameEndsAt:null, boardEndsAt:null,
+  powerups:[]
+};
 
 // ---------- Sections & Refs ----------
-const lobby  = el('lobby');
-const reveal = el('reveal');
-const game   = el('game');
-const board  = el('board');
-
+const lobby  = el('lobby');  const reveal = el('reveal'); const game = el('game'); const board = el('board');
 const avatarCanvas = el('avatarCanvas'); const ac = avatarCanvas?.getContext('2d');
-const nameInput = el('nameInput');
-const readyChk = el('readyChk');
-const playerList = el('playerList');
-const startBtn = el('startBtn');
-const readyCount = el('readyCount');
-
-const chatLog = el('chatLog');
-const chatInput = el('chatInput');
-const chatSend = el('chatSend');
-
-const revealAvatar = el('revealAvatar');
-const revealTitle  = el('revealTitle');
-const revealText   = el('revealText');
-const countdown    = el('countdown');
-
+const nameInput = el('nameInput'); const readyChk = el('readyChk'); const playerList = el('playerList'); const startBtn = el('startBtn'); const readyCount = el('readyCount');
+const chatLog = el('chatLog'); const chatInput = el('chatInput'); const chatSend = el('chatSend');
+const revealAvatar = el('revealAvatar'); const revealTitle  = el('revealTitle'); const revealText   = el('revealText'); const countdown = el('countdown');
 const gameCanvas = el('gameCanvas'); const gctx = gameCanvas?.getContext('2d');
-const roundText = el('roundText'); const gameTimer = el('gameTimer'); const infectCount = el('infectCount');
-
-const boardRound = el('boardRound'); const boardRows = el('boardRows');
-const boardNext = el('boardNext'); const boardCountdown = el('boardCountdown');
-const finalExtras = el('finalExtras');
-const boardChatLog = el('boardChatLog'); const boardChatInput = el('boardChatInput'); const boardChatSend = el('boardChatSend');
-const playAgainBtn = el('playAgainBtn');
+const roundText = el('roundText'); const gameTimer = el('gameTimer'); const infectCount = el('infectCount'); const powerHUD = el('powerHUD');
+const boardRound = el('boardRound'); const boardRows = el('boardRows'); const boardNext = el('boardNext'); const boardCountdown = el('boardCountdown');
+const finalExtras = el('finalExtras'); const boardChatLog = el('boardChatLog'); const boardChatInput = el('boardChatInput'); const boardChatSend = el('boardChatSend'); const playAgainBtn = el('playAgainBtn');
 
 // ---------- Audio ----------
 let actx, unlocked=false;
@@ -55,27 +41,23 @@ addEventListener('pointerdown', ()=>{ if(!unlocked){ actx = new (window.AudioCon
 const beep = (type='click')=>{
   if (!unlocked) return;
   const now = actx.currentTime, o = actx.createOscillator(), g = actx.createGain();
-  o.type='square'; const tones = { click:660, select:760, ready:520, start:880, tick:440, infect:180, score:620, error:200 };
+  o.type='square';
+  const tones = { click:660, select:760, ready:520, start:880, tick:440, infect:180, power:980, score:620, error:200 };
   o.frequency.value = tones[type] || 660;
   g.gain.setValueAtTime(.001, now); g.gain.exponentialRampToValueAtTime(.2, now+.01); g.gain.exponentialRampToValueAtTime(.001, now+.12);
   o.connect(g); g.connect(actx.destination); o.start(now); o.stop(now+.13);
 };
 
-// ---------- Avatar preview (bigger, with eyes) ----------
-let myAvatarIdx = 5;
+// ---------- Avatar preview ----------
 function drawAvatarPreview(color){
-  if (!ac) return;
-  const ctx = ac; const scale = 14;
+  if (!ac) return; const ctx = ac; const scale = 14;
   const px=(x,y,w,h,c)=>{ ctx.fillStyle=c; ctx.fillRect(x*scale,y*scale,w*scale,h*scale); };
   ctx.clearRect(0,0,ctx.canvas.width,ctx.canvas.height);
-  px(2,2,7,6,color);          // body
-  px(2,8,7,1,'#fff');         // feet
-  px(3,4,2,2,'#fff'); px(6,4,2,2,'#fff'); // eyes
-  px(4,5,1,1,'#000'); px(7,5,1,1,'#000'); // pupils
-  px(9,3,1,1,'#ffd27b');      // hat pixel
+  px(2,2,7,6,color); px(2,8,7,1,'#fff');
+  px(3,4,2,2,'#fff'); px(6,4,2,2,'#fff'); px(4,5,1,1,'#000'); px(7,5,1,1,'#000'); px(9,3,1,1,'#ffd27b');
 }
 
-// ---------- Tiny sprite for UI rows (data URL cache) ----------
+// ---------- Tiny sprite for UI rows (cached data URLs) ----------
 const thumbCache = new Map();
 function makeThumb(color){
   if (thumbCache.has(color)) return thumbCache.get(color);
@@ -106,22 +88,8 @@ const isMovementKey = (k) => (
   k==='ArrowUp' || k==='ArrowDown' || k==='ArrowLeft' || k==='ArrowRight' ||
   k==='w' || k==='a' || k==='s' || k==='d' || k==='W' || k==='A' || k==='S' || k==='D'
 );
-
-addEventListener('keydown', e=>{
-  if (!isMovementKey(e.key)) return;
-  if (state.phase==='GAME') e.preventDefault(); // stop page scroll / focus moves
-  keys[e.key] = true;
-  sendDir();
-}, { passive:false });
-
-addEventListener('keyup', e=>{
-  if (!isMovementKey(e.key)) return;
-  if (state.phase==='GAME') e.preventDefault();
-  keys[e.key] = false;
-  sendDir();
-}, { passive:false });
-
-// Clear stuck keys if tab loses focus (helps “one player can’t move up” issues)
+addEventListener('keydown', e=>{ if (!isMovementKey(e.key)) return; if (state.phase==='GAME') e.preventDefault(); keys[e.key]=true; sendDir(); }, { passive:false });
+addEventListener('keyup',   e=>{ if (!isMovementKey(e.key)) return; if (state.phase==='GAME') e.preventDefault(); keys[e.key]=false; sendDir(); }, { passive:false });
 addEventListener('blur', ()=>{ for (const k in keys) delete keys[k]; sendDir(); });
 document.addEventListener('visibilitychange', ()=>{ if (document.hidden){ for (const k in keys) delete keys[k]; sendDir(); } });
 
@@ -146,9 +114,9 @@ socket.on('room_state', (payload)=>{
   state.players=players||[]; state.world=world||state.world;
   state.countdownEndsAt=countdownEndsAt||null; state.gameEndsAt=gameEndsAt||null; state.boardEndsAt=boardEndsAt??null;
 
-  // update my avatar colour & preview
+  // update my avatar preview
   const me = state.players.find(p=>p.id===state.you);
-  if (me) { const idx = me.avatar|0; if (idx!==undefined) { drawAvatarPreview(palette[idx]); } }
+  if (me) drawAvatarPreview(palette[me.avatar|0]);
 
   // sections + fullscreen
   showPhaseSections(phase);
@@ -187,7 +155,7 @@ socket.on('room_state', (payload)=>{
   if (phase==='LEADERBOARD' && boardRows){
     if (boardRound) boardRound.textContent = `Round ${state.round} of ${state.totalRounds}`;
     boardRows.innerHTML='';
-    (boardData||[]).forEach(row=>{
+    (payload.board||[]).forEach(row=>{
       const div=document.createElement('div'); div.className='trow';
       const cell=document.createElement('div'); cell.className='namecell';
       const img=document.createElement('img'); img.className='picon'; img.src=makeThumb(palette[row.avatar||0]); cell.appendChild(img);
@@ -223,13 +191,13 @@ socket.on('room_state', (payload)=>{
 socket.on('role', ({ role })=>{
   const rctx = revealAvatar?.getContext('2d');
   if (rctx) {
+    const me = state.players.find(p=>p.id===state.you);
+    const color = palette[(me?.avatar|0) || 0];
     const scale = 12, ctx=rctx;
     const px=(x,y,w,h,c)=>{ ctx.fillStyle=c; ctx.fillRect(x*scale,y*scale,w*scale,h*scale); };
     ctx.clearRect(0,0,ctx.canvas.width,ctx.canvas.height);
-    // preview in your assigned colour
-    const me = state.players.find(p=>p.id===state.you);
-    const color = palette[(me?.avatar|0) || 0];
-    px(2,2,7,6,color); px(2,8,7,1,'#fff'); px(3,4,2,2,'#fff'); px(6,4,2,2,'#fff'); px(4,5,1,1,'#000'); px(7,5,1,1,'#000'); px(9,3,1,1,'#ffd27b');
+    px(2,2,7,6,color); px(2,8,7,1,'#fff');
+    px(3,4,2,2,'#fff'); px(6,4,2,2,'#fff'); px(4,5,1,1,'#000'); px(7,5,1,1,'#000'); px(9,3,1,1,'#ffd27b');
   }
   if (revealTitle && revealText){
     if (role==='PATIENT_ZERO'){ revealTitle.textContent='You are patient Zero.'; revealText.textContent='Try and get close to players to infect them.'; }
@@ -246,27 +214,45 @@ socket.on('chat_message', ({ from, avatar, text })=>{
   if (boardChatLog){ boardChatLog.appendChild(row); boardChatLog.scrollTop = boardChatLog.scrollHeight; }
 });
 
+// small SFX on infection or power-up
+socket.on('system_message', (m)=>{
+  if (!m) return;
+  if (m.startsWith('infect:')) beep('infect');
+  if (m.startsWith('power:'))  beep('power');
+});
+
 socket.on('error_message', (m)=>{ console.warn('[server]', m); beep('error'); });
 
 // ---------- Game drawing ----------
 const lastPos = new Map(); let animTime=0, stepPhase=0;
 
-// prevent Space from scrolling too, just in case
 addEventListener('keydown', e=>{ if(state.phase==='GAME' && (e.key===' '||e.code==='Space')){ e.preventDefault(); } }, { passive:false });
 
-socket.on('game_state', ({ phase, positions, round, totalRounds, gameEndsAt })=>{
+socket.on('game_state', ({ phase, positions, round, totalRounds, gameEndsAt, powerups })=>{
   if (phase!=='GAME' || !gctx) return;
 
   if (roundText) roundText.textContent = `Round ${round} of ${totalRounds}`;
   const ms=Math.max(0,(gameEndsAt||Date.now())-Date.now());
-  const s=Math.ceil(ms/1000);
-  if (gameTimer) gameTimer.textContent = s.toString();
+  if (gameTimer) gameTimer.textContent = Math.ceil(ms/1000).toString();
   if (infectCount) infectCount.textContent = positions.filter(p=>p.infected).length.toString();
 
-  drawGame(positions);
+  state.powerups = powerups || [];
+
+  // power HUD (if you have speed)
+  const me = positions.find(p=>p.id===state.you);
+  if (powerHUD){
+    if (me && me.speedUntil && me.speedUntil > Date.now()){
+      const secs = Math.ceil((me.speedUntil - Date.now())/1000);
+      powerHUD.textContent = `Power: SPEED (${secs}s)`;
+    } else {
+      powerHUD.textContent = '';
+    }
+  }
+
+  drawGame(positions, state.powerups);
 });
 
-function drawGame(positions){
+function drawGame(positions, powerups){
   const w=state.world.w, h=state.world.h;
   gctx.clearRect(0,0,w,h);
 
@@ -275,6 +261,15 @@ function drawGame(positions){
 
   // timing
   const now=performance.now(); const dt=(now-animTime)||16; animTime=now; stepPhase += dt*0.02;
+
+  // draw powerups first (little diamond)
+  powerups.forEach(pu=>{
+    const x = Math.round(pu.x), y = Math.round(pu.y);
+    gctx.fillStyle='#fff'; gctx.strokeStyle='#aaa'; gctx.lineWidth=1;
+    gctx.beginPath();
+    gctx.moveTo(x, y-8); gctx.lineTo(x+8, y); gctx.lineTo(x, y+8); gctx.lineTo(x-8, y); gctx.closePath();
+    gctx.stroke(); gctx.fill();
+  });
 
   const infected = positions.filter(p=>p.infected);
   const healthy  = positions.filter(p=>!p.infected);
@@ -295,6 +290,7 @@ function drawGame(positions){
 
     const baseColor = p.infected ? INFECT_COLOR : palette[p.avatar||0];
     drawMiniSprite(gctx, p.x, p.y, baseColor, p.infected, moving, dt, tx, ty);
+
     if (p.id===state.you){
       gctx.fillStyle='#bbb'; gctx.font='12px ui-monospace, monospace'; gctx.textAlign='center';
       gctx.fillText('you', Math.round(p.x), Math.round(p.y)+38);
@@ -302,7 +298,7 @@ function drawGame(positions){
   });
 }
 
-// Bigger sprite (~36px total), with arms:
+// Bigger sprite (~36px), with arms:
 // - Zombies: arms straight out forward.
 // - Citizens: flailing side arms (alternate with stepPhase).
 function drawMiniSprite(ctx, cx, cy, color, infected, moving, dt, tx, ty){
@@ -316,16 +312,14 @@ function drawMiniSprite(ctx, cx, cy, color, infected, moving, dt, tx, ty){
   // arms
   ctx.fillStyle=color;
   if (infected){
-    // forward arms (two bars in front/top)
     ctx.fillRect(x0+10, y0+4, 8, 3);
     ctx.fillRect(x0+22, y0+4, 8, 3);
   } else {
-    // flailing side arms
     const amp = moving ? 4 : 1;
     const yL = y0+16 + Math.round(Math.sin(stepPhase)*amp);
     const yR = y0+16 + Math.round(Math.sin(stepPhase+Math.PI)*amp);
-    ctx.fillRect(x0+2,  yL, 6, 3);  // left arm
-    ctx.fillRect(x0+32, yR, 6, 3);  // right arm
+    ctx.fillRect(x0+2,  yL, 6, 3);
+    ctx.fillRect(x0+32, yR, 6, 3);
   }
 
   // eyes (6x6)
