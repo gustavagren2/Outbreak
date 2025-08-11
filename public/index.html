@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>OUTBREAK</title>
+  <link rel="stylesheet" href="/style.css?v=1"/>
+</head>
+<body>
+  <div class="app">
+    <!-- LOBBY -->
+    <section id="lobby" class="grid-2">
+      <div class="panel">
+        <div class="avatar-preview">
+          <canvas id="avatarCanvas" width="160" height="160"></canvas>
+        </div>
+
+        <label class="field">
+          <span>Select avatar</span>
+          <div id="avatarRow" class="avatar-row"></div>
+        </label>
+
+        <label class="field">
+          <span>Select name</span>
+          <input id="nameInput" placeholder="Randomized"/>
+        </label>
+
+        <label class="field inline">
+          <input id="readyChk" type="checkbox"/> <span>Ready</span>
+        </label>
+
+        <div class="divider"></div>
+
+        <ul id="playerList" class="list"></ul>
+
+        <div class="startbar">
+          <button id="startBtn" disabled>Start game</button>
+          <div id="readyCount" class="muted">0/0 players ready</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div id="chatLog" class="log"></div>
+        <div class="row gap">
+          <input id="chatInput" placeholder="Type a message…"/>
+          <button id="chatSend">Send</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ROLE REVEAL -->
+    <section id="reveal" class="center hidden">
+      <canvas id="revealAvatar" width="120" height="120"></canvas>
+      <h2 id="revealTitle">ROLE</h2>
+      <p id="revealText" class="muted">Instructions.</p>
+      <div id="countdown" class="muted">10s</div>
+      <div class="bar"><div class="fill" id="revealBar" style="width:0%"></div></div>
+    </section>
+
+    <!-- GAME -->
+    <section id="game" class="hidden">
+      <div class="hud top-left">OUTBREAK</div>
+      <div class="hud top-right"><span id="gameTimer">90s</span> TO SURVIVE</div>
+      <div class="hud bottom-right"><span id="infectCount">0</span> INFECTED</div>
+      <div class="hud bottom-left">
+        <div class="bar"><div class="fill" id="timeBar" style="width:0%"></div></div>
+      </div>
+      <canvas id="gameCanvas" width="1100" height="620"></canvas>
+    </section>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    /* --------------------------- Setup & State --------------------------- */
+    const socket = io();
+    const palette = [
+      '#2d3e50','#365e2b','#6f3d20','#2b2b2b','#6b59b1',
+      '#d4458c','#e4b737','#2d5fab','#7a3f75','#7b1c28'
+    ];
+
+    let state = {
+      code: null, you: null, host: false,
+      phase: 'LOBBY',
+      players: [],
+      world: { w: 1100, h: 620 },
+      role: null,
+      countdownEndsAt: null,
+      gameEndsAt: null,
+      dir: {x:0,y:0}
+    };
+
+    /* ------------------------------- UI refs ---------------------------- */
+    const lobby = document.getElementById('lobby');
+    const reveal = document.getElementById('reveal');
+    const game = document.getElementById('game');
+
+    const avatarCanvas = document.getElementById('avatarCanvas');
+    const avatarRow = document.getElementById('avatarRow');
+    const nameInput = document.getElementById('nameInput');
+    const readyChk = document.getElementById('readyChk');
+    const playerList = document.getElementById('playerList');
+    const startBtn = document.getElementById('startBtn');
+    const readyCount = document.getElementById('readyCount');
+
+    const chatLog = document.getElementById('chatLog');
+    const chatInput = document.getElementById('chatInput');
+    const chatSend = document.getElementById('chatSend');
+
+    const revealAvatar = document.getElementById('revealAvatar');
+    const revealTitle = document.getElementById('revealTitle');
+    const revealText  = document.getElementById('revealText');
+    const countdown   = document.getElementById('countdown');
+    const revealBar   = document.getElementById('revealBar');
+
+    const gameCanvas = document.getElementById('gameCanvas');
+    const gctx = gameCanvas.getContext('2d');
+
+    const gameTimer = document.getElementById('gameTimer');
+    const infectCount = document.getElementById('infectCount');
+    const timeBar = document.getElementById('timeBar');
+
+    /* ------------------------- Avatar render (px) ------------------------ */
+    function drawAvatar(ctx, color, scale){
+      const px = (x,y,c)=>{ ctx.fillStyle=c; ctx.fillRect(x*scale,y*scale,scale,scale); };
+      ctx.clearRect(0,0,ctx.canvas.width,ctx.canvas.height);
+      // body block (8x8)
+      for (let y=1;y<7;y++){
+        for (let x=2;x<6;x++){ px(x,y,color); }
+      }
+      // eyes (white + black pupil)
+      px(3,3,'#fff'); px(4,3,'#fff');
+      px(3,3,'#fff'); px(4,3,'#fff');
+      px(3,4,'#000'); px(4,4,'#000');
+      // base
+      for (let x=2;x<6;x++) px(x,7,'#fff');
+      // tiny hat pixel
+      px(6,1,'#ffd27b');
+    }
+    const ac = avatarCanvas.getContext('2d');
+    drawAvatar(ac, palette[5], 20);
+
+    // palette selector
+    let selectedAvatar = 5;
+    function renderPalette(){
+      avatarRow.innerHTML = '';
+      palette.forEach((c, i)=>{
+        const b = document.createElement('button');
+        b.className = 'avatar'+(i===selectedAvatar?' is-selected':'');
+        b.style.background = c;
+        b.onclick = ()=>{
+          selectedAvatar = i;
+          drawAvatar(ac, palette[selectedAvatar], 20);
+          socket.emit('set_avatar', { code: state.code, avatar: selectedAvatar });
+        };
+        avatarRow.appendChild(b);
+      });
+    }
+    renderPalette();
+
+    /* ------------------------------- Lobby ------------------------------ */
+    nameInput.addEventListener('change', ()=>{
+      socket.emit('set_name', { code: state.code, name: nameInput.value.trim() });
+    });
+    readyChk.addEventListener('change', ()=>{
+      socket.emit('set_ready', { code: state.code, ready: readyChk.checked });
+    });
+    chatSend.onclick = sendChat;
+    chatInput.addEventListener('keydown', e=>{ if (e.key==='Enter') sendChat(); });
+    function sendChat(){
+      const t = chatInput.value.trim(); if (!t) return;
+      socket.emit('chat', { code: state.code, message: t });
+      chatInput.value = '';
+    }
+
+    startBtn.onclick = ()=> socket.emit('start_game', { code: state.code });
+
+    /* ------------------------------ Movement ---------------------------- */
+    const keys = {};
+    addEventListener('keydown', e=>{ keys[e.key] = true; updateDir(); });
+    addEventListener('keyup',   e=>{ keys[e.key] = false; updateDir(); });
+    function updateDir(){
+      if (state.phase !== 'GAME') return;
+      const x = (keys['ArrowRight']||keys['d']||keys['D']?1:0) - (keys['ArrowLeft']||keys['a']||keys['A']?1:0);
+      const y = (keys['ArrowDown']||keys['s']||keys['S']?1:0) - (keys['ArrowUp']||keys['w']||keys['W']?1:0);
+      socket.emit('input', { code: state.code, dir: { x, y } });
+    }
+
+    /* ------------------------------- Sockets ---------------------------- */
+    socket.on('room_joined', ({ code, you, host })=>{
+      state.code = code; state.you = you; state.host = !!host;
+    });
+
+    socket.on('room_state', ({ phase, players, countdownEndsAt, gameEndsAt, world })=>{
+      state.phase = phase;
+      state.players = players;
+      state.world = world || state.world;
+      state.countdownEndsAt = countdownEndsAt;
+      state.gameEndsAt = gameEndsAt;
+
+      // UI toggles
+      lobby.classList.toggle('hidden', phase!=='LOBBY');
+      reveal.classList.toggle('hidden', phase!=='COUNTDOWN');
+      game.classList.toggle('hidden', phase!=='GAME');
+
+      // lobby list
+      playerList.innerHTML = '';
+      const readyNum = players.filter(p=>p.ready).length;
+      readyCount.textContent = `${readyNum}/${players.length} players ready`;
+      startBtn.disabled = !(state.host && players.length>=3 && readyNum===players.length);
+
+      players.forEach(p=>{
+        const li = document.createElement('li');
+        li.innerHTML = `<span class="dot" style="background:${palette[p.avatar||0]}"></span> ${p.name} ${p.id===state.you?'<span class="muted">(you)</span>':''} ${p.id===state.you && state.host?'<span class="tag">HOST</span>':''} ${p.ready?'<span class="ok">READY</span>':''}`;
+        playerList.appendChild(li);
+      });
+
+      // countdown display
+      if (phase==='COUNTDOWN') {
+        tickCountdown();
+        if (!countdownTimer) countdownTimer = setInterval(tickCountdown, 200);
+      } else {
+        clearInterval(countdownTimer); countdownTimer = null;
+      }
+    });
+
+    socket.on('role', ({ role })=>{
+      state.role = role;
+      // show reveal messaging
+      drawAvatar(revealAvatar.getContext('2d'), palette[selectedAvatar], 12);
+      if (role==='PATIENT_ZERO'){
+        revealTitle.textContent = 'PATIENT ZERO';
+        revealText.textContent = 'You infect others. Stay near targets for 1 second to convert.';
+      } else {
+        revealTitle.textContent = 'CITIZEN';
+        revealText.textContent = 'Avoid the infected. Survive until the timer ends.';
+      }
+    });
+
+    socket.on('chat_message', ({ from, text })=>{
+      const div = document.createElement('div');
+      div.textContent = `${from}: ${text}`;
+      chatLog.appendChild(div);
+      chatLog.scrollTop = chatLog.scrollHeight;
+    });
+
+    socket.on('system_message', (m)=> {
+      // simple log
+      const div = document.createElement('div');
+      div.textContent = `[${new Date().toLocaleTimeString().slice(0,8)}] ${m}`;
+      chatLog.appendChild(div);
+      chatLog.scrollTop = chatLog.scrollHeight;
+    });
+
+    let countdownTimer = null;
+    function tickCountdown(){
+      const ms = Math.max(0, (state.countdownEndsAt||Date.now()) - Date.now());
+      const s = Math.ceil(ms/1000);
+      countdown.textContent = s + 's';
+      const pct = 100 - (ms / 10000) * 100;
+      revealBar.style.width = Math.max(0, Math.min(100, pct)) + '%';
+    }
+
+    socket.on('game_state', ({ phase, positions, countdownEndsAt, gameEndsAt })=>{
+      if (phase!=='GAME') return;
+
+      // HUD time
+      const ms = Math.max(0, (gameEndsAt||Date.now()) - Date.now());
+      const s = Math.ceil(ms/1000);
+      gameTimer.textContent = s + 's';
+      timeBar.style.width = (100 - (ms / 90000) * 100) + '%';
+
+      const infectedNum = positions.filter(p=>p.infected).length;
+      infectCount.textContent = infectedNum;
+
+      // draw
+      drawGame(positions);
+    });
+
+    /* ------------------------------ Drawing ----------------------------- */
+    function drawGame(positions){
+      const w = state.world.w, h = state.world.h;
+      gctx.clearRect(0,0,w,h);
+
+      // frame
+      gctx.strokeStyle = '#fff';
+      gctx.lineWidth = 2;
+      gctx.strokeRect(6,6,w-12,h-12);
+
+      // draw players
+      positions.forEach(p=>{
+        // proximity square around infected
+        if (p.infected){
+          gctx.fillStyle = 'rgba(255,255,255,0.06)';
+          gctx.fillRect(p.x-36, p.y-36, 72, 72);
+          gctx.strokeStyle = 'rgba(255,255,255,0.18)';
+          gctx.strokeRect(p.x-36, p.y-36, 72, 72);
+        }
+        // body
+        gctx.imageSmoothingEnabled = false;
+        drawMiniSprite(gctx, p.x, p.y, palette[(state.players.find(pl=>pl.id===p.id)?.avatar)||0]);
+        // name (self always; others on hover could be added later)
+        if (p.id === state.you){
+          gctx.fillStyle = '#bbb';
+          gctx.font = '12px ui-monospace, monospace';
+          gctx.textAlign = 'center';
+          gctx.fillText('you', p.x, p.y + 28);
+        }
+      });
+    }
+
+    function drawMiniSprite(ctx, cx, cy, color){
+      // 8x8 sprite at 3px scale
+      const s = 3;
+      const x0 = Math.round(cx) - 12;
+      const y0 = Math.round(cy) - 12;
+      ctx.fillStyle = color;
+      // body 4x6
+      ctx.fillRect(x0+6, y0+3, 12, 18);
+      // base
+      ctx.fillStyle = '#fff'; ctx.fillRect(x0+6, y0+21, 12, 3);
+      // eyes
+      ctx.fillStyle = '#fff'; ctx.fillRect(x0+8, y0+6, 3, 3); ctx.fillRect(x0+13, y0+6, 3, 3);
+      ctx.fillStyle = '#000'; ctx.fillRect(x0+9, y0+7, 1, 1); ctx.fillRect(x0+14, y0+7, 1, 1);
+      // hat pixel
+      ctx.fillStyle = '#ffd27b'; ctx.fillRect(x0+18, y0+3, 3, 3);
+    }
+
+    /* --------------------------- Bootstrapping -------------------------- */
+    // Auto-create a room locally for convenience (open second tab to Join)
+    socket.emit('create_room', { name: 'HOST' });
+
+    // In a second tab, run: socket.emit('join_room',{ code: '<CODE>', name:'Player' })
+    // For production, you can swap to a simple "Enter Code" UI if you like.
+  </script>
+</body>
+</html>
