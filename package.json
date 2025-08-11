@@ -1,13 +1,10 @@
 {
   "name": "outbreak-mvp",
-  "version": "1.1.0",
-  "description": "Monochrome multiplayer Outbreak (Socket.IO + Express) with rounds, leaderboard, and 8-bit sfx.",
+  "version": "1.2.0",
+  "description": "Monochrome multiplayer Outbreak (Socket.IO + Express) — single shared room, role reveal, rounds, leaderboard, 8-bit SFX.",
   "type": "module",
   "main": "server.js",
-  "scripts": {
-    "start": "node server.js",
-    "dev": "NODE_ENV=development node server.js"
-  },
+  "scripts": { "start": "node server.js" },
   "engines": { "node": ">=20" },
   "dependencies": {
     "express": "^4.19.2",
