@@ -80,7 +80,6 @@ const thumbCache = new Map();
 function makeThumb(color){
   if (thumbCache.has(color)) return thumbCache.get(color);
   const c = document.createElement('canvas'); c.width=18; c.height=18; const x=c.getContext('2d'); x.imageSmoothingEnabled=false;
-  // mini body
   x.fillStyle=color; x.fillRect(4,4,10,10);
   x.fillStyle='#fff'; x.fillRect(6,7,3,3); x.fillRect(11,7,3,3);
   x.fillStyle='#000'; x.fillRect(7,8,1,1); x.fillRect(12,8,1,1);
@@ -101,15 +100,36 @@ boardChatInput?.addEventListener('keydown', e=>{ if (e.key==='Enter') sendBoardC
 startBtn?.addEventListener('click', ()=>{ socket.emit('start_game'); beep('start'); });
 playAgainBtn?.addEventListener('click', ()=>{ socket.emit('restart_series'); beep('start'); });
 
-// ---------- Movement ----------
-const keys={};
-addEventListener('keydown', e=>{ keys[e.key]=true; sendDir(); });
-addEventListener('keyup',   e=>{ keys[e.key]=false; sendDir(); });
+// ---------- Movement (robust) ----------
+const keys = Object.create(null);
+const isMovementKey = (k) => (
+  k==='ArrowUp' || k==='ArrowDown' || k==='ArrowLeft' || k==='ArrowRight' ||
+  k==='w' || k==='a' || k==='s' || k==='d' || k==='W' || k==='A' || k==='S' || k==='D'
+);
+
+addEventListener('keydown', e=>{
+  if (!isMovementKey(e.key)) return;
+  if (state.phase==='GAME') e.preventDefault(); // stop page scroll / focus moves
+  keys[e.key] = true;
+  sendDir();
+}, { passive:false });
+
+addEventListener('keyup', e=>{
+  if (!isMovementKey(e.key)) return;
+  if (state.phase==='GAME') e.preventDefault();
+  keys[e.key] = false;
+  sendDir();
+}, { passive:false });
+
+// Clear stuck keys if tab loses focus (helps “one player can’t move up” issues)
+addEventListener('blur', ()=>{ for (const k in keys) delete keys[k]; sendDir(); });
+document.addEventListener('visibilitychange', ()=>{ if (document.hidden){ for (const k in keys) delete keys[k]; sendDir(); } });
+
 function sendDir(){
   if (state.phase!=='GAME') return;
-  const x=(keys['ArrowRight']||keys['d']||keys['D']?1:0)-(keys['ArrowLeft']||keys['a']||keys['A']?1:0);
-  const y=(keys['ArrowDown']||keys['s']||keys['S']?1:0)-(keys['ArrowUp']||keys['w']||keys['W']?1:0);
-  socket.emit('input', { dir:{x,y} });
+  const x = (keys['ArrowRight']||keys['d']||keys['D']?1:0) - (keys['ArrowLeft']||keys['a']||keys['A']?1:0);
+  const y = (keys['ArrowDown']||keys['s']||keys['S']?1:0) - (keys['ArrowUp']||keys['w']||keys['W']?1:0);
+  socket.emit('input', { dir:{ x, y } });
 }
 
 // ---------- Sockets ----------
@@ -128,16 +148,23 @@ socket.on('room_state', (payload)=>{
 
   // update my avatar colour & preview
   const me = state.players.find(p=>p.id===state.you);
-  if (me) { myAvatarIdx = me.avatar|0; drawAvatarPreview(palette[myAvatarIdx]); }
+  if (me) { const idx = me.avatar|0; if (idx!==undefined) { drawAvatarPreview(palette[idx]); } }
 
+  // sections + fullscreen
   showPhaseSections(phase);
 
   // LOBBY
   if (phase==='LOBBY' && playerList){
     playerList.innerHTML='';
     const readyNum = state.players.filter(p=>p.ready).length;
+
+    // Host-only "Start game"
+    if (startBtn) {
+      startBtn.classList.toggle('hidden', !state.host);
+      startBtn.disabled = !(state.host && state.players.length>=3 && readyNum===state.players.length);
+    }
     if (readyCount) readyCount.textContent = `${readyNum}/${state.players.length} players ready`;
-    if (startBtn) startBtn.disabled = !(state.host && state.players.length>=3 && readyNum===state.players.length);
+
     state.players.forEach(p=>{
       const li=document.createElement('li');
       const img = document.createElement('img'); img.className='picon'; img.src = makeThumb(palette[p.avatar||0]); img.alt='';
@@ -196,12 +223,13 @@ socket.on('room_state', (payload)=>{
 socket.on('role', ({ role })=>{
   const rctx = revealAvatar?.getContext('2d');
   if (rctx) {
-    // preview uses your assigned colour
     const scale = 12, ctx=rctx;
     const px=(x,y,w,h,c)=>{ ctx.fillStyle=c; ctx.fillRect(x*scale,y*scale,w*scale,h*scale); };
     ctx.clearRect(0,0,ctx.canvas.width,ctx.canvas.height);
-    px(2,2,7,6,palette[myAvatarIdx]); px(2,8,7,1,'#fff');
-    px(3,4,2,2,'#fff'); px(6,4,2,2,'#fff'); px(4,5,1,1,'#000'); px(7,5,1,1,'#000'); px(9,3,1,1,'#ffd27b');
+    // preview in your assigned colour
+    const me = state.players.find(p=>p.id===state.you);
+    const color = palette[(me?.avatar|0) || 0];
+    px(2,2,7,6,color); px(2,8,7,1,'#fff'); px(3,4,2,2,'#fff'); px(6,4,2,2,'#fff'); px(4,5,1,1,'#000'); px(7,5,1,1,'#000'); px(9,3,1,1,'#ffd27b');
   }
   if (revealTitle && revealText){
     if (role==='PATIENT_ZERO'){ revealTitle.textContent='You are patient Zero.'; revealText.textContent='Try and get close to players to infect them.'; }
@@ -223,7 +251,8 @@ socket.on('error_message', (m)=>{ console.warn('[server]', m); beep('error'); })
 // ---------- Game drawing ----------
 const lastPos = new Map(); let animTime=0, stepPhase=0;
 
-addEventListener('keydown', e=>{ if(state.phase==='GAME' && (e.key===' '||e.code==='Space')) e.preventDefault(); }, { passive:false });
+// prevent Space from scrolling too, just in case
+addEventListener('keydown', e=>{ if(state.phase==='GAME' && (e.key===' '||e.code==='Space')){ e.preventDefault(); } }, { passive:false });
 
 socket.on('game_state', ({ phase, positions, round, totalRounds, gameEndsAt })=>{
   if (phase!=='GAME' || !gctx) return;
