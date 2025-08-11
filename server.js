@@ -1,349 +1,323 @@
-// ---------- Utilities ----------
-const el = (id) => {
-  const e = document.getElementById(id);
-  if (!e) console.warn(`[UI] Missing element #${id}`);
-  return e;
-};
-function showPhaseSections(phase) {
-  if (lobby)  lobby.classList.toggle('hidden',  phase !== 'LOBBY');
-  if (reveal) reveal.classList.toggle('hidden', phase !== 'COUNTDOWN');
-  if (game)   game.classList.toggle('hidden',   phase !== 'GAME');
-  if (board)  board.classList.toggle('hidden',  phase !== 'LEADERBOARD');
+import express from 'express';
+import http from 'http';
+import { Server } from 'socket.io';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname  = path.dirname(__filename);
+
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: '*' } });
+
+app.use(express.static(path.join(__dirname, 'public')));
+app.get('/healthz', (req, res) => res.send('ok'));
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => console.log('listening on :' + PORT));
+
+/* ---------------------------- Game State ---------------------------- */
+const PHASE = { LOBBY:'LOBBY', COUNTDOWN:'COUNTDOWN', GAME:'GAME', LEADERBOARD:'LEADERBOARD', END:'END' };
+const DEFAULT_CODE = 'ROOM'; // Single shared room for everyone
+
+const rooms = new Map();
+/*
+room = {
+  code, hostId,
+  phase, round, totalRounds,
+  players: Map<id, Player>,
+  countdownEndsAt?, gameEndsAt?, boardEndsAt?,
+  tick?,
+  exposure: Map<victimId, ms>,
+  world: { w,h },
+  options: { speed, radius, infectMs, roundMs, countdownMs, boardMs, minPlayers, points:{survivalPerSec, perInfection, p0FullInfectBonus} },
+  scores: Map<id, { total:number, infections:number, survivalMs:number }>,
+  board?: Array
 }
+Player = { id,name,avatar,ready,dir:{x,y},x,y,infected:boolean, round:{survivalMs:number,infections:number,isP0:boolean} }
+*/
 
-// ---------- Socket ----------
-const socket = io();
+const clamp = (v,min,max)=> v<min?min:v>max?max:v;
 
-// ---------- Palette ----------
-const palette = [
-  '#2d3e50','#365e2b','#6f3d20','#2b2b2b','#6b59b1',
-  '#d4458c','#e4b737','#2d5fab','#7a3f75','#7b1c28'
-];
-
-// ---------- State ----------
-let state = {
-  you: null,
-  host: false,
-  phase: 'LOBBY',
-  round: 0,
-  totalRounds: 0,
-  players: [],
-  world: { w: 1100, h: 620 },
-  countdownEndsAt: null,
-  gameEndsAt: null,
-  boardEndsAt: null
-};
-
-// ---------- Sections ----------
-const lobby  = el('lobby');
-const reveal = el('reveal');
-const game   = el('game');
-const board  = el('board');
-
-// ---------- Lobby refs ----------
-const avatarCanvas = el('avatarCanvas'); const ac = avatarCanvas?.getContext('2d');
-const avatarRow = el('avatarRow');
-const nameInput = el('nameInput');
-const readyChk = el('readyChk');
-const playerList = el('playerList');
-const startBtn = el('startBtn');
-const readyCount = el('readyCount');
-
-const chatLog = el('chatLog');
-const chatInput = el('chatInput');
-const chatSend = el('chatSend');
-
-// ---------- Reveal refs ----------
-const revealAvatar = el('revealAvatar');
-const revealTitle  = el('revealTitle');
-const revealText   = el('revealText');
-const countdown    = el('countdown');
-
-// ---------- Game refs ----------
-const gameCanvas = el('gameCanvas'); const gctx = gameCanvas?.getContext('2d');
-const roundText = el('roundText');
-const gameTimer = el('gameTimer');
-const infectCount = el('infectCount');
-const timeBar = el('timeBar');
-
-// ---------- Board refs ----------
-const boardRound = el('boardRound');
-const boardRows  = el('boardRows');
-
-// ---------- Audio (8-bit beeps) ----------
-let actx, unlocked=false;
-const unlockAudio = () => { if (!unlocked){ actx = new (window.AudioContext||window.webkitAudioContext)(); unlocked=true; } };
-addEventListener('pointerdown', unlockAudio, { once:true });
-const beep = (type='click')=>{
-  if (!unlocked) return;
-  const now = actx.currentTime;
-  const o = actx.createOscillator();
-  const g = actx.createGain();
-  o.type = 'square';
-  const tones = { click:660, select:760, ready:520, start:880, tick:440, infect:180, score:620 };
-  o.frequency.value = tones[type] || 660;
-  g.gain.setValueAtTime(.001, now);
-  g.gain.exponentialRampToValueAtTime(.2, now + .01);
-  g.gain.exponentialRampToValueAtTime(.001, now + .12);
-  o.connect(g); g.connect(actx.destination);
-  o.start(now); o.stop(now + .13);
-};
-
-// ---------- Avatar drawing (two big eyes) ----------
-let selectedAvatar = 5;
-function drawAvatar(ctx, color, scale){
-  const px=(x,y,w,h,c)=>{ ctx.fillStyle=c; ctx.fillRect(x*scale,y*scale,w*scale,h*scale); };
-  ctx.clearRect(0,0,ctx.canvas.width,ctx.canvas.height);
-  px(2,2,6,5,color);          // body
-  px(2,7,6,1,'#fff');         // feet/base
-  // eyes: white rectangles 2x2 + black pupils 1x1
-  px(3,3,2,2,'#fff'); px(6,3,2,2,'#fff');
-  px(4,4,1,1,'#000'); px(7,4,1,1,'#000');
-  px(8,2,1,1,'#ffd27b');      // hat pixel
-}
-if (ac) drawAvatar(ac, palette[selectedAvatar], 16);
-
-function renderPalette(){
-  if (!avatarRow) return;
-  avatarRow.innerHTML = '';
-  palette.forEach((c, i)=>{
-    const b = document.createElement('button');
-    b.className = 'avatar' + (i===selectedAvatar ? ' is-selected' : '');
-    b.style.background = c;
-    b.onclick = ()=>{
-      selectedAvatar = i;
-      if (ac) drawAvatar(ac, palette[selectedAvatar], 16);
-      socket.emit('set_avatar', { avatar: selectedAvatar });
-      beep('select');
-    };
-    avatarRow.appendChild(b);
-  });
-}
-renderPalette();
-
-// ---------- Lobby handlers ----------
-nameInput?.addEventListener('change', ()=>{
-  socket.emit('set_name', { name: nameInput.value.trim() });
-  beep('click');
-});
-readyChk?.addEventListener('change', ()=>{
-  socket.emit('set_ready', { ready: readyChk.checked });
-  beep('ready');
-});
-chatSend?.addEventListener('click', sendChat);
-chatInput?.addEventListener('keydown', e=>{ if (e.key==='Enter') sendChat(); });
-function sendChat(){
-  const t = chatInput.value.trim(); if (!t) return;
-  socket.emit('chat', { message: t });
-  chatInput.value = '';
-  beep('click');
-}
-startBtn?.addEventListener('click', ()=>{
-  socket.emit('start_game');
-  beep('start');
-});
-
-// ---------- Movement input ----------
-const keys={};
-addEventListener('keydown', e=> { keys[e.key]=true; sendDir(); });
-addEventListener('keyup',   e=> { keys[e.key]=false; sendDir(); });
-function sendDir(){
-  if (state.phase!=='GAME') return;
-  const x = (keys['ArrowRight']||keys['d']||keys['D']?1:0) - (keys['ArrowLeft']||keys['a']||keys['A']?1:0);
-  const y = (keys['ArrowDown']||keys['s']||keys['S']?1:0) - (keys['ArrowUp']||keys['w']||keys['W']?1:0);
-  socket.emit('input', { dir: { x, y } });
-}
-
-// ---------- Sockets ----------
-socket.on('room_joined', ({ you, host })=>{
-  state.you = you; state.host = !!host;
-});
-
-socket.on('room_state', (payload)=>{
-  const { phase, round, totalRounds, players, countdownEndsAt, gameEndsAt, boardEndsAt, board:boardData, world } = payload;
-
-  state.phase = phase;
-  state.round = round;
-  state.totalRounds = totalRounds;
-  state.players = players || [];
-  state.world = world || state.world;
-  state.countdownEndsAt = countdownEndsAt || null;
-  state.gameEndsAt = gameEndsAt || null;
-  state.boardEndsAt = boardEndsAt || null;
-
-  // section visibility
-  showPhaseSections(phase);
-
-  // LOBBY
-  if (phase === 'LOBBY'){
-    if (playerList) {
-      playerList.innerHTML = '';
-      const readyNum = state.players.filter(p=>p.ready).length;
-      if (readyCount) readyCount.textContent = `${readyNum}/${state.players.length} players ready`;
-      if (startBtn) startBtn.disabled = !(state.host && state.players.length>=3 && readyNum===state.players.length);
-
-      state.players.forEach(p=>{
-        const li = document.createElement('li');
-        li.innerHTML = `<span class="dot" style="background:${palette[p.avatar||0]}"></span> ${p.name} ${p.id===state.you?'<span class="muted">(you)</span>':''} ${p.id===state.you&&state.host?'<span class="tag host">HOST</span>':''} ${p.ready?'<span class="ok">READY</span>':''}`;
-        playerList.appendChild(li);
-      });
-    }
-  }
-
-  // COUNTDOWN
-  if (phase === 'COUNTDOWN') startCountdownTicks(); else stopCountdownTicks();
-
-  // LEADERBOARD
-  if (phase === 'LEADERBOARD' && boardRows){
-    if (boardRound) boardRound.textContent = `Round ${state.round} of ${state.totalRounds}`;
-    boardRows.innerHTML = '';
-    (boardData||[]).forEach(row=>{
-      const div = document.createElement('div'); div.className = 'trow';
-      div.innerHTML = `
-        <div><span class="dot" style="background:${palette[row.avatar||0]}"></span> ${row.name}</div>
-        <div class="t-right">${row.survSec}</div>
-        <div class="t-right">${row.infections}</div>
-        <div class="t-right">${row.bonus}</div>
-        <div class="t-right">${row.roundScore}</div>
-        <div class="t-right">${row.total}</div>`;
-      boardRows.appendChild(div);
-    });
-    beep('score');
-  }
-});
-
-socket.on('role', ({ role })=>{
-  const ctx = revealAvatar?.getContext('2d');
-  if (ctx) drawAvatar(ctx, palette[selectedAvatar], 12);
-  if (revealTitle && revealText){
-    if (role === 'PATIENT_ZERO'){
-      revealTitle.textContent = 'You are patient Zero.';
-      revealText.textContent = 'Try and get close to players to infect them.';
-    } else {
-      revealTitle.textContent = 'You are a citizen.';
-      revealText.textContent = 'Stay away from infected players.';
-    }
-  }
-});
-
-socket.on('chat_message', ({ from, text })=>{
-  if (!chatLog) return;
-  const div = document.createElement('div');
-  div.textContent = `${from}: ${text}`;
-  chatLog.appendChild(div);
-  chatLog.scrollTop = chatLog.scrollHeight;
-});
-
-socket.on('system_message', (m)=>{ if (m?.startsWith?.('infect:')) beep('infect'); });
-
-let countdownTimer=null;
-function startCountdownTicks(){
-  stopCountdownTicks();
-  const run=()=>{
-    const ms = Math.max(0, (state.countdownEndsAt||Date.now()) - Date.now());
-    const s = Math.ceil(ms/1000);
-    if (countdown) countdown.textContent = s + 's';
-    if (s <= 3) beep('tick');
+function ensureDefaultRoom(){
+  let room = rooms.get(DEFAULT_CODE);
+  if (room) return room;
+  room = {
+    code: DEFAULT_CODE,
+    hostId: null,
+    phase: PHASE.LOBBY,
+    round: 0,
+    totalRounds: 0,
+    players: new Map(),
+    exposure: new Map(),
+    world: { w: 1100, h: 620 },
+    options: {
+      speed: 180,           // px/s
+      radius: 36,           // proximity radius
+      infectMs: 1000,       // ms within radius to convert
+      roundMs: 90_000,      // 90s per round
+      countdownMs: 10_000,  // 10s reveal
+      boardMs: 6000,        // 6s leaderboard screen (between rounds)
+      minPlayers: 3,
+      points: {
+        survivalPerSec: 1,      // +1 per second alive
+        perInfection: 25,       // +25 per infection caused
+        p0FullInfectBonus: 50   // +50 if Patient Zero infects everyone
+      }
+    },
+    scores: new Map()
   };
-  run(); countdownTimer = setInterval(run, 200);
+  rooms.set(DEFAULT_CODE, room);
+  return room;
 }
-function stopCountdownTicks(){ if(countdownTimer){ clearInterval(countdownTimer); countdownTimer=null; } }
 
-// ---------- Game drawing ----------
-const lastPos = new Map(); // for movement detection
-let animTime = 0;
+function randomSpawn(room){
+  return { x: Math.random() * (room.world.w - 80) + 40, y: Math.random() * (room.world.h - 80) + 40 };
+}
 
-socket.on('game_state', ({ phase, positions, round, totalRounds, gameEndsAt })=>{
-  if (phase !== 'GAME' || !gctx) return;
+function publicPlayers(room){
+  return [...room.players.values()].map(p=>({
+    id:p.id, name:p.name, avatar:p.avatar, ready:p.ready
+  }));
+}
 
-  // HUD
-  if (roundText) roundText.textContent = `Round ${round} of ${totalRounds}`;
-  const ms = Math.max(0, (gameEndsAt||Date.now()) - Date.now());
-  const s = Math.ceil(ms/1000);
-  if (gameTimer) gameTimer.textContent = s.toString();
-  if (timeBar) timeBar.style.width = (100 - (ms / 90000) * 100) + '%';
-  if (infectCount) infectCount.textContent = positions.filter(p=>p.infected).length.toString();
-
-  drawGame(positions);
-});
-
-function drawGame(positions){
-  const w = state.world.w, h = state.world.h;
-  gctx.clearRect(0,0,w,h);
-
-  // white frame
-  gctx.strokeStyle = '#fff';
-  gctx.lineWidth = 2;
-  gctx.strokeRect(6,6,w-12,h-12);
-
-  // time for animation
-  const now = performance.now();
-  const dt = (now - animTime) || 16;
-  animTime = now;
-
-  const infected = positions.filter(p=>p.infected);
-  const healthy  = positions.filter(p=>!p.infected);
-
-  positions.forEach(p=>{
-    // green proximity square for infected
-    if (p.infected){
-      gctx.fillStyle = 'rgba(0,255,0,0.08)';
-      gctx.fillRect(p.x-36, p.y-36, 72, 72);
-      gctx.strokeStyle = 'rgba(0,255,0,0.25)';
-      gctx.strokeRect(p.x-36, p.y-36, 72, 72);
-    }
-
-    const last = lastPos.get(p.id) || { x:p.x, y:p.y };
-    const moving = (Math.hypot(p.x-last.x, p.y-last.y) > 0.5);
-    lastPos.set(p.id, { x:p.x, y:p.y });
-
-    // eye target: citizens look at nearest infected; infected look at nearest healthy
-    let tx=p.x, ty=p.y-12;
-    const pool = p.infected ? healthy : infected;
-    if (pool.length){
-      let best=null, d2=1e9;
-      for (const o of pool){ const dx=o.x-p.x, dy=o.y-p.y, dd=dx*dx+dy*dy; if (dd<d2){ d2=dd; best=o; } }
-      if (best){ tx=best.x; ty=best.y; }
-    }
-
-    drawMiniSprite(gctx, p.x, p.y, palette[p.avatar||0], moving, dt, tx, ty);
-
-    if (p.id === state.you){
-      gctx.fillStyle = '#bbb';
-      gctx.font = '12px ui-monospace, monospace';
-      gctx.textAlign = 'center';
-      gctx.fillText('you', Math.round(p.x), Math.round(p.y) + 28);
-    }
+function sendRoomStateTo(socketId, room){
+  io.to(socketId).emit('room_state', {
+    code: room.code,
+    phase: room.phase,
+    round: room.round,
+    totalRounds: room.totalRounds,
+    players: publicPlayers(room),
+    countdownEndsAt: room.countdownEndsAt || null,
+    gameEndsAt: room.gameEndsAt || null,
+    boardEndsAt: room.boardEndsAt || null,
+    board: room.phase === PHASE.LEADERBOARD ? (room.board || []) : [],
+    world: room.world
   });
 }
 
-// mini sprite with two big eyes; pupils track (tx,ty); “feet” alternate when moving
-let stepPhase = 0;
-function drawMiniSprite(ctx, cx, cy, color, moving, dt, tx, ty){
-  stepPhase += (moving ? dt*0.02 : dt*0.006); // faster steps when moving
-  const footOff = moving ? (Math.sin(stepPhase)*1) : 0;
-
-  const x0 = Math.round(cx) - 12;
-  const y0 = Math.round(cy) - 12;
-
-  ctx.imageSmoothingEnabled = false;
-
-  // body
-  ctx.fillStyle = color; ctx.fillRect(x0+6, y0+6, 12, 12);
-
-  // eyes (white rectangles 4x4)
-  ctx.fillStyle = '#fff'; ctx.fillRect(x0+7, y0+8, 4, 4); ctx.fillRect(x0+13, y0+8, 4, 4);
-
-  // pupils offset toward target (max 1px)
-  const dx = Math.max(-1, Math.min(1, Math.round((tx - cx)/20)));
-  const dy = Math.max(-1, Math.min(1, Math.round((ty - cy)/20)));
-  ctx.fillStyle = '#000'; ctx.fillRect(x0+9+dx, y0+10+dy, 2, 2); ctx.fillRect(x0+15+dx, y0+10+dy, 2, 2);
-
-  // hat pixel
-  ctx.fillStyle = '#ffd27b'; ctx.fillRect(x0+18, y0+6, 3, 3);
-
-  // feet/base (alternate 1px to imply steps)
-  ctx.fillStyle = '#fff';
-  ctx.fillRect(x0+6,  y0+18 + (footOff>0?1:0), 5, 3);
-  ctx.fillRect(x0+13, y0+18 + (footOff<0?1:0), 5, 3);
+function broadcastRoom(room){
+  io.to(room.code).emit('room_state', {
+    code: room.code,
+    phase: room.phase,
+    round: room.round,
+    totalRounds: room.totalRounds,
+    players: publicPlayers(room),
+    countdownEndsAt: room.countdownEndsAt || null,
+    gameEndsAt: room.gameEndsAt || null,
+    boardEndsAt: room.boardEndsAt || null,
+    board: room.phase === PHASE.LEADERBOARD ? (room.board || []) : [],
+    world: room.world
+  });
 }
+function broadcastGame(room){
+  const positions = [...room.players.values()].map(p=>({ id:p.id, x:p.x, y:p.y, infected:p.infected, avatar:p.avatar }));
+  io.to(room.code).emit('game_state', {
+    phase: room.phase,
+    positions,
+    round: room.round,
+    totalRounds: room.totalRounds,
+    gameEndsAt: room.gameEndsAt || null
+  });
+}
+
+/* ------------------------------- Rounds ------------------------------ */
+function startGameSeries(room){
+  room.totalRounds = Math.max(1, room.players.size * 2);
+  room.round = 0;
+  for (const id of room.players.keys()){
+    if (!room.scores.has(id)) room.scores.set(id, { total:0, infections:0, survivalMs:0 });
+  }
+  startNextRound(room);
+}
+
+function startNextRound(room){
+  room.round += 1;
+
+  // reset per-round state
+  room.exposure.clear();
+  for (const p of room.players.values()){
+    const s = randomSpawn(room);
+    p.x = s.x; p.y = s.y;
+    p.dir.x = 0; p.dir.y = 0;
+    p.infected = false;
+    p.round = { survivalMs:0, infections:0, isP0:false };
+  }
+
+  // pick patient zero
+  const ids = [...room.players.keys()];
+  if (ids.length === 0) return;
+  const p0 = ids[Math.random()*ids.length|0];
+  const pz = room.players.get(p0);
+  pz.infected = true; pz.round.isP0 = true;
+
+  // role reveal per player
+  for (const p of room.players.values()){
+    io.to(p.id).emit('role', { role: p.round.isP0 ? 'PATIENT_ZERO' : 'CITIZEN' });
+  }
+
+  room.phase = PHASE.COUNTDOWN;
+  room.countdownEndsAt = Date.now() + room.options.countdownMs;
+  room.gameEndsAt = null; room.boardEndsAt = null;
+
+  setTimeout(()=> startRoundPlay(room), room.options.countdownMs);
+  broadcastRoom(room);
+}
+
+function startRoundPlay(room){
+  if (room.phase !== PHASE.COUNTDOWN) return;
+  room.phase = PHASE.GAME;
+  room.gameEndsAt = Date.now() + room.options.roundMs;
+  room.countdownEndsAt = null;
+
+  if (room.tick) clearInterval(room.tick);
+  const dtMs = 50; // 20Hz
+  room.tick = setInterval(()=> tick(room, dtMs), dtMs);
+
+  broadcastRoom(room);
+}
+
+function endRound(room){
+  room.phase = PHASE.LEADERBOARD;
+  if (room.tick) { clearInterval(room.tick); room.tick = null; }
+  room.countdownEndsAt = null; room.gameEndsAt = null;
+
+  const everybodyInfected = [...room.players.values()].every(p=>p.infected);
+  const board = [];
+  for (const p of room.players.values()){
+    const survSec = Math.floor(p.round.survivalMs/1000);
+    const fromSurv = survSec * room.options.points.survivalPerSec;
+    const fromInf  = p.round.infections * room.options.points.perInfection;
+    const bonus    = (p.round.isP0 && everybodyInfected) ? room.options.points.p0FullInfectBonus : 0;
+    const roundScore = fromSurv + fromInf + bonus;
+
+    const t = room.scores.get(p.id) || { total:0, infections:0, survivalMs:0 };
+    t.total += roundScore; t.infections += p.round.infections; t.survivalMs += p.round.survivalMs;
+    room.scores.set(p.id, t);
+
+    board.push({ id:p.id, name:p.name, avatar:p.avatar, survSec, infections:p.round.infections, bonus, roundScore, total:t.total });
+  }
+  board.sort((a,b)=> b.roundScore - a.roundScore || b.total - a.total);
+  room.board = board;
+
+  // If final round, keep leaderboard up indefinitely
+  if (room.round >= room.totalRounds){
+    room.boardEndsAt = null;
+    broadcastRoom(room);
+    return;
+  }
+
+  // Otherwise show for a few seconds, then go next round
+  room.boardEndsAt = Date.now() + room.options.boardMs;
+  broadcastRoom(room);
+  setTimeout(()=> startNextRound(room), room.options.boardMs);
+}
+
+/* -------------------------------- Tick ------------------------------- */
+function tick(room, dtMs){
+  if (room.phase !== PHASE.GAME) return;
+  const dt = dtMs/1000, speed = room.options.speed;
+
+  // integrate + survival accumulation
+  for (const p of room.players.values()){
+    p.x = clamp(p.x + p.dir.x * speed * dt, 16, room.world.w-16);
+    p.y = clamp(p.y + p.dir.y * speed * dt, 16, room.world.h-16);
+    if (!p.infected) p.round.survivalMs += dtMs;
+  }
+
+  // infection proximity check
+  const infected = [...room.players.values()].filter(p=>p.infected);
+  const healthy  = [...room.players.values()].filter(p=>!p.infected);
+
+  for (const h of healthy){
+    let nearId = null, nearDist2 = Infinity;
+    for (const z of infected){
+      const dx = z.x - h.x, dy = z.y - h.y, d2 = dx*dx + dy*dy;
+      if (d2 <= room.options.radius*room.options.radius && d2 < nearDist2){ nearDist2 = d2; nearId = z.id; }
+    }
+    if (nearId){
+      const t = room.exposure.get(h.id) || 0, nt = t + dtMs;
+      if (nt >= room.options.infectMs){
+        h.infected = true; room.exposure.delete(h.id);
+        const src = room.players.get(nearId); if (src) src.round.infections += 1;
+        io.to(room.code).emit('system_message', `infect:${h.name}`);
+      } else room.exposure.set(h.id, nt);
+    } else room.exposure.delete(h.id);
+  }
+
+  // round end?
+  const everyoneInfected = [...room.players.values()].every(p=>p.infected);
+  if (everyoneInfected) { endRound(room); return; }
+  if (Date.now() >= room.gameEndsAt) { endRound(room); return; }
+
+  broadcastGame(room);
+}
+
+/* ------------------------------ Sockets ------------------------------ */
+io.on('connection', (socket)=>{
+  // Everyone joins the single shared room.
+  const room = ensureDefaultRoom();
+  socket.join(room.code);
+
+  // Add player
+  const spawn = randomSpawn(room);
+  room.players.set(socket.id, {
+    id: socket.id, name: 'PLAYER', avatar: 0, ready: false,
+    dir:{x:0,y:0}, x:spawn.x, y:spawn.y, infected:false,
+    round:{survivalMs:0,infections:0,isP0:false}
+  });
+  if (!room.hostId) room.hostId = socket.id; // first becomes host
+
+  socket.emit('room_joined', { code: room.code, you: socket.id, host: room.hostId===socket.id });
+  sendRoomStateTo(socket.id, room);   // immediate snapshot for this client
+  broadcastRoom(room);                // broadcast update for everyone else
+
+  socket.on('set_name', ({ name })=>{
+    const r = ensureDefaultRoom(); const p = r.players.get(socket.id); if (!p) return;
+    p.name = String(name||'').slice(0,16) || p.name; broadcastRoom(r);
+  });
+  socket.on('set_avatar', ({ avatar })=>{
+    const r = ensureDefaultRoom(); const p = r.players.get(socket.id); if (!p) return;
+    p.avatar = Math.max(0, Math.min(9, avatar|0)); broadcastRoom(r);
+  });
+  socket.on('set_ready', ({ ready })=>{
+    const r = ensureDefaultRoom(); const p = r.players.get(socket.id); if (!p) return;
+    p.ready = !!ready; broadcastRoom(r);
+  });
+  socket.on('chat', ({ message })=>{
+    const r = ensureDefaultRoom(); if (r.phase !== PHASE.LOBBY) return;
+    const p = r.players.get(socket.id); if (!p) return;
+    io.to(r.code).emit('chat_message', { from:p.name, text:String(message||'').slice(0,300) });
+  });
+  socket.on('start_game', ()=>{
+    const r = ensureDefaultRoom(); if (socket.id !== r.hostId) return;
+    const players = [...r.players.values()];
+    const min = r.options.minPlayers;
+    const allReady = players.length >= min && players.every(p=>p.ready);
+    if (!allReady) return socket.emit('error_message','not_ready');
+    startGameSeries(r);
+  });
+  socket.on('input', ({ dir })=>{
+    const r = ensureDefaultRoom(); if (r.phase !== PHASE.GAME) return;
+    const p = r.players.get(socket.id); if (!p) return;
+    const x = Number(dir?.x)||0, y=Number(dir?.y)||0; const len = Math.hypot(x,y)||1;
+    p.dir.x = x/len; p.dir.y = y/len;
+  });
+
+  socket.on('disconnect', ()=>{
+    const r = ensureDefaultRoom();
+    if (!r.players.has(socket.id)) return;
+    const wasHost = r.hostId === socket.id;
+    r.players.delete(socket.id);
+    r.exposure.delete(socket.id);
+    if (wasHost){
+      const next = r.players.keys().next().value;
+      r.hostId = next || null;
+    }
+    if (r.phase !== PHASE.LOBBY && r.players.size === 0){
+      if (r.tick) clearInterval(r.tick);
+      rooms.delete(r.code);
+    } else broadcastRoom(r);
+  });
+});

@@ -1,8 +1,11 @@
-:root { --bg:#0a0a0a; --bg2:#111; --fg:#fff; --muted:#9a9a9a; --line:#2a2a2a; --focus:#e6e6e6;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, "Roboto Mono", Consolas, "Liberation Mono", "Courier New", monospace; color-scheme: dark; }
+:root {
+  --bg:#0a0a0a; --bg2:#111; --fg:#fff; --muted:#9a9a9a; --line:#2a2a2a; --focus:#e6e6e6;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, "Roboto Mono", Consolas, "Liberation Mono", "Courier New", monospace;
+  color-scheme: dark;
+}
 *{ box-sizing:border-box; }
 html, body { height:100%; }
-body { margin:0; background:var(--bg); color:var(--fg); overflow:hidden; } /* prevent accidental page scroll */
+body { margin:0; background:var(--bg); color:var(--fg); overflow:hidden; } /* lock page scroll */
 h1,h2,h3{ margin:0 0 8px; font-weight:600; letter-spacing:.5px; text-transform:uppercase; }
 p{ margin:0; }
 .small{ font-size:12px; letter-spacing:.5px; text-transform:uppercase; }
@@ -15,7 +18,7 @@ p{ margin:0; }
 
 .panel { border:1px solid var(--line); padding: 12px; }
 .column { display:flex; flex-direction:column; }
-.grow { flex:1 1 auto; min-height:0; } /* allow internal scroll instead */
+.grow { flex:1 1 auto; min-height:0; } /* internal scroll only */
 .divider { height:1px; background: var(--line); margin: 12px 0; }
 
 .field { display:grid; gap:6px; margin:8px 0; }
