@@ -4,13 +4,13 @@
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>OUTBREAK</title>
-  <link rel="stylesheet" href="/style.css?v=1"/>
+  <link rel="stylesheet" href="/style.css?v=2"/>
 </head>
 <body>
   <div class="app">
-    <!-- LOBBY -->
-    <section id="lobby" class="grid-2">
-      <div class="panel">
+    <!-- LOBBY (full screen) -->
+    <section id="lobby" class="grid-2 full">
+      <div class="panel column">
         <div class="avatar-preview">
           <canvas id="avatarCanvas" width="160" height="160"></canvas>
         </div>
@@ -31,7 +31,7 @@
 
         <div class="divider"></div>
 
-        <ul id="playerList" class="list"></ul>
+        <ul id="playerList" class="list grow"></ul>
 
         <div class="startbar">
           <button id="startBtn" disabled>Start game</button>
@@ -39,8 +39,8 @@
         </div>
       </div>
 
-      <div class="panel">
-        <div id="chatLog" class="log"></div>
+      <div class="panel column">
+        <div id="chatLog" class="log grow"></div>
         <div class="row gap">
           <input id="chatInput" placeholder="Type a message…"/>
           <button id="chatSend">Send</button>
@@ -53,19 +53,32 @@
       <canvas id="revealAvatar" width="120" height="120"></canvas>
       <h2 id="revealTitle">ROLE</h2>
       <p id="revealText" class="muted">Instructions.</p>
-      <div id="countdown" class="muted">10s</div>
-      <div class="bar"><div class="fill" id="revealBar" style="width:0%"></div></div>
+      <div class="muted small">Game is starting in</div>
+      <div id="countdown" class="count-num">10s</div>
     </section>
 
     <!-- GAME -->
     <section id="game" class="hidden">
-      <div class="hud top-left">OUTBREAK</div>
-      <div class="hud top-right"><span id="gameTimer">90s</span> TO SURVIVE</div>
-      <div class="hud bottom-right"><span id="infectCount">0</span> INFECTED</div>
+      <div class="hud top-left"><span id="roundText">Round 1 of 1</span></div>
+      <div class="hud top-right"><span id="gameTimer">90</span> Seconds remaining</div>
+      <div class="hud bottom-right"><span id="infectCount">0</span> Players infected</div>
       <div class="hud bottom-left">
-        <div class="bar"><div class="fill" id="timeBar" style="width:0%"></div></div>
+        <div class="bar green"><div class="fill" id="timeBar" style="width:0%"></div></div>
       </div>
       <canvas id="gameCanvas" width="1100" height="620"></canvas>
+    </section>
+
+    <!-- LEADERBOARD -->
+    <section id="board" class="center hidden">
+      <h2>LEADERBOARD</h2>
+      <div id="boardRound" class="muted small">Round 1 summary</div>
+      <div class="table">
+        <div class="thead">
+          <div>Player</div><div class="t-right">Survival (s)</div><div class="t-right">Infected</div><div class="t-right">Bonus</div><div class="t-right">Round</div><div class="t-right">Total</div>
+        </div>
+        <div id="boardRows" class="tbody"></div>
+      </div>
+      <div id="boardNext" class="muted small">Next round in …</div>
     </section>
   </div>
 
@@ -81,18 +94,41 @@
     let state = {
       code: null, you: null, host: false,
       phase: 'LOBBY',
+      round: 0, totalRounds: 0,
       players: [],
       world: { w: 1100, h: 620 },
       role: null,
       countdownEndsAt: null,
       gameEndsAt: null,
-      dir: {x:0,y:0}
+      boardEndsAt: null
     };
+
+    /* ------------------------------ WebAudio ----------------------------- */
+    let actx, unlocked=false;
+    const unlockAudio = () => { if (!unlocked){ actx = new (window.AudioContext||window.webkitAudioContext)(); unlocked = true; } };
+    const beep = (type='click')=>{
+      if (!unlocked) return;
+      const now = actx.currentTime;
+      const o = actx.createOscillator();
+      const g = actx.createGain();
+      o.type = 'square';
+      const tones = {
+        click: 660, select: 760, ready: 520, start: 880, tick: 440, infect: 180, score: 620
+      };
+      o.frequency.value = tones[type] || 660;
+      g.gain.setValueAtTime(.001, now);
+      g.gain.exponentialRampToValueAtTime(.2, now + 0.01);
+      g.gain.exponentialRampToValueAtTime(.001, now + 0.12);
+      o.connect(g); g.connect(actx.destination);
+      o.start(now); o.stop(now + 0.13);
+    };
+    addEventListener('pointerdown', unlockAudio, { once:true });
 
     /* ------------------------------- UI refs ---------------------------- */
     const lobby = document.getElementById('lobby');
     const reveal = document.getElementById('reveal');
     const game = document.getElementById('game');
+    const board = document.getElementById('board');
 
     const avatarCanvas = document.getElementById('avatarCanvas');
     const avatarRow = document.getElementById('avatarRow');
@@ -110,37 +146,38 @@
     const revealTitle = document.getElementById('revealTitle');
     const revealText  = document.getElementById('revealText');
     const countdown   = document.getElementById('countdown');
-    const revealBar   = document.getElementById('revealBar');
 
     const gameCanvas = document.getElementById('gameCanvas');
     const gctx = gameCanvas.getContext('2d');
-
+    const roundText = document.getElementById('roundText');
     const gameTimer = document.getElementById('gameTimer');
     const infectCount = document.getElementById('infectCount');
     const timeBar = document.getElementById('timeBar');
 
+    const boardRound = document.getElementById('boardRound');
+    const boardRows  = document.getElementById('boardRows');
+    const boardNext  = document.getElementById('boardNext');
+
     /* ------------------------- Avatar render (px) ------------------------ */
+    // 2 big white eye rectangles + black pupils (as per your art direction)
     function drawAvatar(ctx, color, scale){
-      const px = (x,y,c)=>{ ctx.fillStyle=c; ctx.fillRect(x*scale,y*scale,scale,scale); };
+      const px = (x,y,w,h,c)=>{ ctx.fillStyle=c; ctx.fillRect(x*scale,y*scale,w*scale,h*scale); };
       ctx.clearRect(0,0,ctx.canvas.width,ctx.canvas.height);
-      // body block (8x8)
-      for (let y=1;y<7;y++){
-        for (let x=2;x<6;x++){ px(x,y,color); }
-      }
-      // eyes (white + black pupil)
-      px(3,3,'#fff'); px(4,3,'#fff');
-      px(3,3,'#fff'); px(4,3,'#fff');
-      px(3,4,'#000'); px(4,4,'#000');
-      // base
-      for (let x=2;x<6;x++) px(x,7,'#fff');
-      // tiny hat pixel
-      px(6,1,'#ffd27b');
+      // body (6x5) centered-ish
+      px(2,2,6,5,color);
+      // base platform
+      px(2,7,6,1,'#fff');
+      // eyes: white rectangles 2x2, pupils 1x1
+      px(3,3,2,2,'#fff'); px(6,3,2,2,'#fff');
+      px(4,4,1,1,'#000'); px(7,4,1,1,'#000');
+      // hat pixel
+      px(8,2,1,1,'#ffd27b');
     }
     const ac = avatarCanvas.getContext('2d');
-    drawAvatar(ac, palette[5], 20);
+    let selectedAvatar = 5;
+    drawAvatar(ac, palette[selectedAvatar], 16);
 
     // palette selector
-    let selectedAvatar = 5;
     function renderPalette(){
       avatarRow.innerHTML = '';
       palette.forEach((c, i)=>{
@@ -149,8 +186,9 @@
         b.style.background = c;
         b.onclick = ()=>{
           selectedAvatar = i;
-          drawAvatar(ac, palette[selectedAvatar], 20);
+          drawAvatar(ac, palette[selectedAvatar], 16);
           socket.emit('set_avatar', { code: state.code, avatar: selectedAvatar });
+          beep('select');
         };
         avatarRow.appendChild(b);
       });
@@ -160,9 +198,11 @@
     /* ------------------------------- Lobby ------------------------------ */
     nameInput.addEventListener('change', ()=>{
       socket.emit('set_name', { code: state.code, name: nameInput.value.trim() });
+      beep('click');
     });
     readyChk.addEventListener('change', ()=>{
       socket.emit('set_ready', { code: state.code, ready: readyChk.checked });
+      beep('ready');
     });
     chatSend.onclick = sendChat;
     chatInput.addEventListener('keydown', e=>{ if (e.key==='Enter') sendChat(); });
@@ -170,9 +210,9 @@
       const t = chatInput.value.trim(); if (!t) return;
       socket.emit('chat', { code: state.code, message: t });
       chatInput.value = '';
+      beep('click');
     }
-
-    startBtn.onclick = ()=> socket.emit('start_game', { code: state.code });
+    startBtn.onclick = ()=>{ socket.emit('start_game', { code: state.code }); beep('start'); };
 
     /* ------------------------------ Movement ---------------------------- */
     const keys = {};
@@ -190,49 +230,63 @@
       state.code = code; state.you = you; state.host = !!host;
     });
 
-    socket.on('room_state', ({ phase, players, countdownEndsAt, gameEndsAt, world })=>{
+    socket.on('room_state', ({ phase, round, totalRounds, players, countdownEndsAt, gameEndsAt, boardEndsAt, board:boardData, world })=>{
       state.phase = phase;
-      state.players = players;
-      state.world = world || state.world;
-      state.countdownEndsAt = countdownEndsAt;
-      state.gameEndsAt = gameEndsAt;
+      state.round = round; state.totalRounds = totalRounds;
+      state.players = players; state.world = world || state.world;
+      state.countdownEndsAt = countdownEndsAt; state.gameEndsAt = gameEndsAt; state.boardEndsAt = boardEndsAt || null;
 
       // UI toggles
       lobby.classList.toggle('hidden', phase!=='LOBBY');
       reveal.classList.toggle('hidden', phase!=='COUNTDOWN');
       game.classList.toggle('hidden', phase!=='GAME');
+      board.classList.toggle('hidden', phase!=='LEADERBOARD');
 
-      // lobby list
-      playerList.innerHTML = '';
-      const readyNum = players.filter(p=>p.ready).length;
-      readyCount.textContent = `${readyNum}/${players.length} players ready`;
-      startBtn.disabled = !(state.host && players.length>=3 && readyNum===players.length);
+      // LOBBY render
+      if (phase === 'LOBBY'){
+        playerList.innerHTML = '';
+        const readyNum = players.filter(p=>p.ready).length;
+        readyCount.textContent = `${readyNum}/${players.length} players ready`;
+        startBtn.disabled = !(state.host && players.length>=3 && readyNum===players.length);
+        players.forEach(p=>{
+          const li = document.createElement('li');
+          const isHost = (players[0] && p.id === players[0].id && p.id === state.you && state.host) || false;
+          li.innerHTML = `<span class="dot" style="background:${palette[p.avatar||0]}"></span> ${p.name} ${p.id===state.you?'<span class="muted">(you)</span>':''} ${p.id===state.you && state.host?'<span class="tag host">HOST</span>':''} ${p.ready?'<span class="ok">READY</span>':''}`;
+          playerList.appendChild(li);
+        });
+      }
 
-      players.forEach(p=>{
-        const li = document.createElement('li');
-        li.innerHTML = `<span class="dot" style="background:${palette[p.avatar||0]}"></span> ${p.name} ${p.id===state.you?'<span class="muted">(you)</span>':''} ${p.id===state.you && state.host?'<span class="tag">HOST</span>':''} ${p.ready?'<span class="ok">READY</span>':''}`;
-        playerList.appendChild(li);
-      });
+      // COUNTDOWN render
+      if (phase === 'COUNTDOWN') tickCountdown(); else clearInterval(countdownTimer);
 
-      // countdown display
-      if (phase==='COUNTDOWN') {
-        tickCountdown();
-        if (!countdownTimer) countdownTimer = setInterval(tickCountdown, 200);
-      } else {
-        clearInterval(countdownTimer); countdownTimer = null;
+      // LEADERBOARD render
+      if (phase === 'LEADERBOARD'){
+        boardRound.textContent = `Round ${round} of ${totalRounds}`;
+        boardRows.innerHTML = '';
+        (boardData||[]).forEach(row=>{
+          const div = document.createElement('div');
+          div.className = 'trow';
+          div.innerHTML = `
+            <div><span class="dot" style="background:${palette[row.avatar||0]}"></span> ${row.name}</div>
+            <div class="t-right">${row.survSec}</div>
+            <div class="t-right">${row.infections}</div>
+            <div class="t-right">${row.bonus}</div>
+            <div class="t-right">${row.roundScore}</div>
+            <div class="t-right">${row.total}</div>`;
+          boardRows.appendChild(div);
+        });
       }
     });
 
     socket.on('role', ({ role })=>{
       state.role = role;
-      // show reveal messaging
       drawAvatar(revealAvatar.getContext('2d'), palette[selectedAvatar], 12);
       if (role==='PATIENT_ZERO'){
-        revealTitle.textContent = 'PATIENT ZERO';
-        revealText.textContent = 'You infect others. Stay near targets for 1 second to convert.';
+        revealTitle.textContent = 'You are patient Zero.';
+        revealText.textContent = 'Try and get close to players to infect them.';
       } else {
-        revealTitle.textContent = 'CITIZEN';
-        revealText.textContent = 'Avoid the infected. Survive until the timer ends.';
+        revealTitle.textContent = 'You are a citizen.';
+        revealText.textContent = 'Stay away from infected players.';
       }
     });
 
@@ -244,7 +298,7 @@
     });
 
     socket.on('system_message', (m)=> {
-      // simple log
+      if (m.startsWith('infect:')) beep('infect');
       const div = document.createElement('div');
       div.textContent = `[${new Date().toLocaleTimeString().slice(0,8)}] ${m}`;
       chatLog.appendChild(div);
@@ -253,26 +307,32 @@
 
     let countdownTimer = null;
     function tickCountdown(){
-      const ms = Math.max(0, (state.countdownEndsAt||Date.now()) - Date.now());
-      const s = Math.ceil(ms/1000);
-      countdown.textContent = s + 's';
-      const pct = 100 - (ms / 10000) * 100;
-      revealBar.style.width = Math.max(0, Math.min(100, pct)) + '%';
+      if (countdownTimer) clearInterval(countdownTimer);
+      const run = ()=> {
+        const ms = Math.max(0, (state.countdownEndsAt||Date.now()) - Date.now());
+        const s = Math.ceil(ms/1000);
+        countdown.textContent = s + 's';
+        if (s <= 3) beep('tick');
+      };
+      run();
+      countdownTimer = setInterval(run, 200);
     }
 
-    socket.on('game_state', ({ phase, positions, countdownEndsAt, gameEndsAt })=>{
+    socket.on('game_state', ({ phase, positions, round, totalRounds, gameEndsAt })=>{
       if (phase!=='GAME') return;
+
+      roundText.textContent = `Round ${round} of ${totalRounds}`;
 
       // HUD time
       const ms = Math.max(0, (gameEndsAt||Date.now()) - Date.now());
       const s = Math.ceil(ms/1000);
-      gameTimer.textContent = s + 's';
+      gameTimer.textContent = s.toString();
       timeBar.style.width = (100 - (ms / 90000) * 100) + '%';
 
       const infectedNum = positions.filter(p=>p.infected).length;
-      infectCount.textContent = infectedNum;
+      infectCount.textContent = infectedNum.toString();
 
-      // draw
+      // draw game
       drawGame(positions);
     });
 
@@ -281,56 +341,50 @@
       const w = state.world.w, h = state.world.h;
       gctx.clearRect(0,0,w,h);
 
-      // frame
+      // white frame
       gctx.strokeStyle = '#fff';
       gctx.lineWidth = 2;
       gctx.strokeRect(6,6,w-12,h-12);
 
       // draw players
-      positions.forEach(p=>{
-        // proximity square around infected
+      for (const p of positions){
         if (p.infected){
-          gctx.fillStyle = 'rgba(255,255,255,0.06)';
+          // green proximity square per your design
+          gctx.fillStyle = 'rgba(0,255,0,0.08)';
           gctx.fillRect(p.x-36, p.y-36, 72, 72);
-          gctx.strokeStyle = 'rgba(255,255,255,0.18)';
+          gctx.strokeStyle = 'rgba(0,255,0,0.25)';
           gctx.strokeRect(p.x-36, p.y-36, 72, 72);
         }
-        // body
-        gctx.imageSmoothingEnabled = false;
-        drawMiniSprite(gctx, p.x, p.y, palette[(state.players.find(pl=>pl.id===p.id)?.avatar)||0]);
-        // name (self always; others on hover could be added later)
+        drawMiniSprite(gctx, p.x, p.y, palette[p.avatar||0]);
         if (p.id === state.you){
           gctx.fillStyle = '#bbb';
           gctx.font = '12px ui-monospace, monospace';
           gctx.textAlign = 'center';
-          gctx.fillText('you', p.x, p.y + 28);
+          gctx.fillText('you', Math.round(p.x), Math.round(p.y) + 28);
         }
-      });
+      }
     }
-
+    // Mini sprite with two white eye rectangles + black pupils
     function drawMiniSprite(ctx, cx, cy, color){
-      // 8x8 sprite at 3px scale
       const s = 3;
       const x0 = Math.round(cx) - 12;
       const y0 = Math.round(cy) - 12;
-      ctx.fillStyle = color;
-      // body 4x6
-      ctx.fillRect(x0+6, y0+3, 12, 18);
+      ctx.imageSmoothingEnabled = false;
+      // body
+      ctx.fillStyle = color; ctx.fillRect(x0+6, y0+6, 12, 12);
       // base
-      ctx.fillStyle = '#fff'; ctx.fillRect(x0+6, y0+21, 12, 3);
-      // eyes
-      ctx.fillStyle = '#fff'; ctx.fillRect(x0+8, y0+6, 3, 3); ctx.fillRect(x0+13, y0+6, 3, 3);
-      ctx.fillStyle = '#000'; ctx.fillRect(x0+9, y0+7, 1, 1); ctx.fillRect(x0+14, y0+7, 1, 1);
+      ctx.fillStyle = '#fff'; ctx.fillRect(x0+6, y0+18, 12, 3);
+      // eyes (white rectangles 2x2)
+      ctx.fillRect(x0+7, y0+8, 4, 4); ctx.fillRect(x0+13, y0+8, 4, 4);
+      // pupils (black 1x2)
+      ctx.fillStyle = '#000'; ctx.fillRect(x0+9, y0+9, 2, 2); ctx.fillRect(x0+15, y0+9, 2, 2);
       // hat pixel
-      ctx.fillStyle = '#ffd27b'; ctx.fillRect(x0+18, y0+3, 3, 3);
+      ctx.fillStyle = '#ffd27b'; ctx.fillRect(x0+18, y0+6, 3, 3);
     }
 
     /* --------------------------- Bootstrapping -------------------------- */
-    // Auto-create a room locally for convenience (open second tab to Join)
+    // Auto-create room for quick testing (open second tab to join)
     socket.emit('create_room', { name: 'HOST' });
-
-    // In a second tab, run: socket.emit('join_room',{ code: '<CODE>', name:'Player' })
-    // For production, you can swap to a simple "Enter Code" UI if you like.
   </script>
 </body>
 </html>

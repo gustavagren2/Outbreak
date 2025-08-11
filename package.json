@@ -1,7 +1,7 @@
 {
   "name": "outbreak-mvp",
-  "version": "1.0.0",
-  "description": "Monochrome web-based multiplayer 'Outbreak' (Socket.IO + Express).",
+  "version": "1.1.0",
+  "description": "Monochrome multiplayer Outbreak (Socket.IO + Express) with rounds, leaderboard, and 8-bit sfx.",
   "type": "module",
   "main": "server.js",
   "scripts": {
