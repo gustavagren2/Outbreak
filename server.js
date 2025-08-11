@@ -18,8 +18,11 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => console.log('listening on :' + PORT));
 
 /* ---------------------------- Game State ---------------------------- */
-const PHASE = { LOBBY:'LOBBY', COUNTDOWN:'COUNTDOWN', GAME:'GAME', LEADERBOARD:'LEADERBOARD', END:'END' };
-const DEFAULT_CODE = 'ROOM'; // Single shared room for everyone
+const PHASE = { LOBBY:'LOBBY', COUNTDOWN:'COUNTDOWN', GAME:'GAME', LEADERBOARD:'LEADERBOARD' };
+const DEFAULT_CODE = 'ROOM'; // single shared room
+
+// 10-slot palette (indexes 0..9)
+const PALETTE = [0,1,2,3,4,5,6,7,8,9];
 
 const rooms = new Map();
 /*
@@ -27,13 +30,16 @@ room = {
   code, hostId,
   phase, round, totalRounds,
   players: Map<id, Player>,
-  countdownEndsAt?, gameEndsAt?, boardEndsAt?,
+  gameEndsAt?, countdownEndsAt?, boardEndsAt?,
   tick?,
-  exposure: Map<victimId, ms>,
   world: { w,h },
-  options: { speed, radius, infectMs, roundMs, countdownMs, boardMs, minPlayers, points:{survivalPerSec, perInfection, p0FullInfectBonus} },
+  options: {
+    speed, contactDist, roundMs, countdownMs, boardMs, minPlayers,
+    points:{ survivalPerSec, perInfection, p0FullInfectBonus }
+  },
   scores: Map<id, { total:number, infections:number, survivalMs:number }>,
-  board?: Array
+  board?: Array,
+  p0Queue: string[]
 }
 Player = { id,name,avatar,ready,dir:{x,y},x,y,infected:boolean, round:{survivalMs:number,infections:number,isP0:boolean} }
 */
@@ -50,30 +56,45 @@ function ensureDefaultRoom(){
     round: 0,
     totalRounds: 0,
     players: new Map(),
-    exposure: new Map(),
-    world: { w: 1100, h: 620 },
+    world: { w: 1600, h: 900 }, // fixed world; client scales to fullscreen
     options: {
-      speed: 180,           // px/s
-      radius: 36,           // proximity radius
-      infectMs: 1000,       // ms within radius to convert
+      speed: 200,           // px/s
+      contactDist: 18,      // collision distance for instant infection
       roundMs: 90_000,      // 90s per round
-      countdownMs: 10_000,  // 10s reveal
-      boardMs: 6000,        // 6s leaderboard screen (between rounds)
+      countdownMs: 10_000,  // 10s role reveal
+      boardMs: 6000,        // leaderboard between rounds
       minPlayers: 3,
       points: {
         survivalPerSec: 1,      // +1 per second alive
-        perInfection: 25,       // +25 per infection caused
-        p0FullInfectBonus: 50   // +50 if Patient Zero infects everyone
+        perInfection: 25,       // +25 per infection
+        p0FullInfectBonus: 50   // +50 if P0 infects everyone
       }
     },
-    scores: new Map()
+    scores: new Map(),
+    p0Queue: []
   };
   rooms.set(DEFAULT_CODE, room);
   return room;
 }
 
 function randomSpawn(room){
-  return { x: Math.random() * (room.world.w - 80) + 40, y: Math.random() * (room.world.h - 80) + 40 };
+  return {
+    x: Math.random() * (room.world.w - 120) + 60,
+    y: Math.random() * (room.world.h - 120) + 60
+  };
+}
+
+function usedAvatars(room){
+  const s = new Set();
+  for (const p of room.players.values()) s.add(p.avatar|0);
+  return s;
+}
+function chooseUnusedAvatar(room){
+  const used = usedAvatars(room);
+  const free = PALETTE.filter(i => !used.has(i));
+  if (free.length) return free[(Math.random()*free.length)|0];
+  // fallback (palette exhausted): allow duplicate randomly
+  return (Math.random()*PALETTE.length)|0;
 }
 
 function publicPlayers(room){
@@ -96,7 +117,6 @@ function sendRoomStateTo(socketId, room){
     world: room.world
   });
 }
-
 function broadcastRoom(room){
   io.to(room.code).emit('room_state', {
     code: room.code,
@@ -112,7 +132,9 @@ function broadcastRoom(room){
   });
 }
 function broadcastGame(room){
-  const positions = [...room.players.values()].map(p=>({ id:p.id, x:p.x, y:p.y, infected:p.infected, avatar:p.avatar }));
+  const positions = [...room.players.values()].map(p=>({
+    id:p.id, x:p.x, y:p.y, infected:p.infected, avatar:p.avatar
+  }));
   io.to(room.code).emit('game_state', {
     phase: room.phase,
     positions,
@@ -122,21 +144,41 @@ function broadcastGame(room){
   });
 }
 
-/* ------------------------------- Rounds ------------------------------ */
+/* ------------------- Patient Zero rotation (twice each) ------------------- */
+function buildP0Queue(room){
+  const ids = [...room.players.keys()];
+  // Everyone appears twice
+  const q = [];
+  ids.forEach(id => { q.push(id, id); });
+  // Shuffle
+  for (let i=q.length-1;i>0;i--){
+    const j = (Math.random()*(i+1))|0;
+    [q[i], q[j]] = [q[j], q[i]];
+  }
+  room.p0Queue = q;
+}
+
+/* -------------------------------- Rounds -------------------------------- */
 function startGameSeries(room){
   room.totalRounds = Math.max(1, room.players.size * 2);
   room.round = 0;
+  // reset totals
+  room.scores.clear();
   for (const id of room.players.keys()){
-    if (!room.scores.has(id)) room.scores.set(id, { total:0, infections:0, survivalMs:0 });
+    room.scores.set(id, { total:0, infections:0, survivalMs:0 });
   }
+  buildP0Queue(room);
   startNextRound(room);
 }
 
 function startNextRound(room){
   room.round += 1;
+  if (room.round > room.totalRounds){
+    // final leaderboard already shown; keep phase at LEADERBOARD
+    return;
+  }
 
-  // reset per-round state
-  room.exposure.clear();
+  // reset per-round
   for (const p of room.players.values()){
     const s = randomSpawn(room);
     p.x = s.x; p.y = s.y;
@@ -145,21 +187,31 @@ function startNextRound(room){
     p.round = { survivalMs:0, infections:0, isP0:false };
   }
 
-  // pick patient zero
-  const ids = [...room.players.keys()];
-  if (ids.length === 0) return;
-  const p0 = ids[Math.random()*ids.length|0];
-  const pz = room.players.get(p0);
-  pz.infected = true; pz.round.isP0 = true;
+  // pick P0 from queue (skip ids that left)
+  let p0 = null;
+  while (room.p0Queue.length && !room.players.has(room.p0Queue[0])) room.p0Queue.shift();
+  if (room.p0Queue.length) p0 = room.p0Queue.shift();
+  else {
+    // fallback if queue exhausted: random among present
+    const ids = [...room.players.keys()];
+    p0 = ids[(Math.random()*ids.length)|0];
+  }
 
-  // role reveal per player
+  if (p0 && room.players.has(p0)){
+    const pz = room.players.get(p0);
+    pz.infected = true; pz.round.isP0 = true;
+  }
+
+  // role reveal private to each player
   for (const p of room.players.values()){
     io.to(p.id).emit('role', { role: p.round.isP0 ? 'PATIENT_ZERO' : 'CITIZEN' });
   }
 
   room.phase = PHASE.COUNTDOWN;
   room.countdownEndsAt = Date.now() + room.options.countdownMs;
-  room.gameEndsAt = null; room.boardEndsAt = null;
+  room.gameEndsAt = null;
+  room.boardEndsAt = null;
+  room.board = null;
 
   setTimeout(()=> startRoundPlay(room), room.options.countdownMs);
   broadcastRoom(room);
@@ -172,7 +224,7 @@ function startRoundPlay(room){
   room.countdownEndsAt = null;
 
   if (room.tick) clearInterval(room.tick);
-  const dtMs = 50; // 20Hz
+  const dtMs = 50; // 20 Hz
   room.tick = setInterval(()=> tick(room, dtMs), dtMs);
 
   broadcastRoom(room);
@@ -201,103 +253,122 @@ function endRound(room){
   board.sort((a,b)=> b.roundScore - a.roundScore || b.total - a.total);
   room.board = board;
 
-  // If final round, keep leaderboard up indefinitely
+  // final or between-round?
   if (room.round >= room.totalRounds){
-    room.boardEndsAt = null;
+    room.boardEndsAt = null; // final stays
     broadcastRoom(room);
-    return;
+  } else {
+    room.boardEndsAt = Date.now() + room.options.boardMs;
+    broadcastRoom(room);
+    setTimeout(()=> startNextRound(room), room.options.boardMs);
   }
-
-  // Otherwise show for a few seconds, then go next round
-  room.boardEndsAt = Date.now() + room.options.boardMs;
-  broadcastRoom(room);
-  setTimeout(()=> startNextRound(room), room.options.boardMs);
 }
 
-/* -------------------------------- Tick ------------------------------- */
+/* --------------------------------- Tick -------------------------------- */
 function tick(room, dtMs){
   if (room.phase !== PHASE.GAME) return;
   const dt = dtMs/1000, speed = room.options.speed;
 
-  // integrate + survival accumulation
+  // integrate + survival
   for (const p of room.players.values()){
-    p.x = clamp(p.x + p.dir.x * speed * dt, 16, room.world.w-16);
-    p.y = clamp(p.y + p.dir.y * speed * dt, 16, room.world.h-16);
+    p.x = clamp(p.x + p.dir.x * speed * dt, 20, room.world.w-20);
+    p.y = clamp(p.y + p.dir.y * speed * dt, 20, room.world.h-20);
     if (!p.infected) p.round.survivalMs += dtMs;
   }
 
-  // infection proximity check
+  // instant infection on contact
   const infected = [...room.players.values()].filter(p=>p.infected);
   const healthy  = [...room.players.values()].filter(p=>!p.infected);
 
   for (const h of healthy){
-    let nearId = null, nearDist2 = Infinity;
+    let source = null;
     for (const z of infected){
-      const dx = z.x - h.x, dy = z.y - h.y, d2 = dx*dx + dy*dy;
-      if (d2 <= room.options.radius*room.options.radius && d2 < nearDist2){ nearDist2 = d2; nearId = z.id; }
+      const dx = z.x - h.x, dy = z.y - h.y;
+      if (dx*dx + dy*dy <= room.options.contactDist * room.options.contactDist){ source = z; break; }
     }
-    if (nearId){
-      const t = room.exposure.get(h.id) || 0, nt = t + dtMs;
-      if (nt >= room.options.infectMs){
-        h.infected = true; room.exposure.delete(h.id);
-        const src = room.players.get(nearId); if (src) src.round.infections += 1;
-        io.to(room.code).emit('system_message', `infect:${h.name}`);
-      } else room.exposure.set(h.id, nt);
-    } else room.exposure.delete(h.id);
+    if (source){
+      h.infected = true;
+      source.round.infections += 1;
+      io.to(room.code).emit('system_message', `infect:${h.name}`);
+    }
   }
 
   // round end?
   const everyoneInfected = [...room.players.values()].every(p=>p.infected);
-  if (everyoneInfected) { endRound(room); return; }
-  if (Date.now() >= room.gameEndsAt) { endRound(room); return; }
+  if (everyoneInfected || Date.now() >= room.gameEndsAt) { endRound(room); return; }
 
   broadcastGame(room);
 }
 
 /* ------------------------------ Sockets ------------------------------ */
 io.on('connection', (socket)=>{
-  // Everyone joins the single shared room.
   const room = ensureDefaultRoom();
   socket.join(room.code);
 
-  // Add player
+  // add player with unique colour
   const spawn = randomSpawn(room);
+  const avatarIdx = chooseUnusedAvatar(room);
   room.players.set(socket.id, {
-    id: socket.id, name: 'PLAYER', avatar: 0, ready: false,
+    id: socket.id, name: 'PLAYER', avatar: avatarIdx, ready: false,
     dir:{x:0,y:0}, x:spawn.x, y:spawn.y, infected:false,
     round:{survivalMs:0,infections:0,isP0:false}
   });
-  if (!room.hostId) room.hostId = socket.id; // first becomes host
+  if (!room.hostId) room.hostId = socket.id;
 
   socket.emit('room_joined', { code: room.code, you: socket.id, host: room.hostId===socket.id });
-  sendRoomStateTo(socket.id, room);   // immediate snapshot for this client
-  broadcastRoom(room);                // broadcast update for everyone else
+  sendRoomStateTo(socket.id, room);
+  broadcastRoom(room);
 
   socket.on('set_name', ({ name })=>{
     const r = ensureDefaultRoom(); const p = r.players.get(socket.id); if (!p) return;
     p.name = String(name||'').slice(0,16) || p.name; broadcastRoom(r);
   });
+
   socket.on('set_avatar', ({ avatar })=>{
     const r = ensureDefaultRoom(); const p = r.players.get(socket.id); if (!p) return;
-    p.avatar = Math.max(0, Math.min(9, avatar|0)); broadcastRoom(r);
+    const idx = Math.max(0, Math.min(9, avatar|0));
+    // enforce uniqueness if possible
+    const takenBy = [...r.players.values()].find(q => q.id !== p.id && (q.avatar|0) === idx);
+    if (takenBy){
+      // deny & re-sync palette
+      socket.emit('error_message','color_taken');
+      sendRoomStateTo(socket.id, r);
+      return;
+    }
+    p.avatar = idx;
+    broadcastRoom(r);
   });
+
   socket.on('set_ready', ({ ready })=>{
     const r = ensureDefaultRoom(); const p = r.players.get(socket.id); if (!p) return;
     p.ready = !!ready; broadcastRoom(r);
   });
+
   socket.on('chat', ({ message })=>{
-    const r = ensureDefaultRoom(); if (r.phase !== PHASE.LOBBY) return;
+    const r = ensureDefaultRoom();
+    if (!r) return;
+    // allow chat in LOBBY and LEADERBOARD (not during GAME/COUNTDOWN to keep it clean)
+    if (r.phase === PHASE.GAME) return;
     const p = r.players.get(socket.id); if (!p) return;
     io.to(r.code).emit('chat_message', { from:p.name, text:String(message||'').slice(0,300) });
   });
+
   socket.on('start_game', ()=>{
     const r = ensureDefaultRoom(); if (socket.id !== r.hostId) return;
     const players = [...r.players.values()];
     const min = r.options.minPlayers;
     const allReady = players.length >= min && players.every(p=>p.ready);
-    if (!allReady) return socket.emit('error_message','not_ready');
+    if (!allReady){ socket.emit('error_message','not_ready'); return; }
     startGameSeries(r);
   });
+
+  socket.on('restart_series', ()=>{
+    const r = ensureDefaultRoom(); if (socket.id !== r.hostId) return;
+    // reset readiness for a clean start
+    for (const p of r.players.values()) p.ready = false;
+    startGameSeries(r);
+  });
+
   socket.on('input', ({ dir })=>{
     const r = ensureDefaultRoom(); if (r.phase !== PHASE.GAME) return;
     const p = r.players.get(socket.id); if (!p) return;
@@ -310,11 +381,11 @@ io.on('connection', (socket)=>{
     if (!r.players.has(socket.id)) return;
     const wasHost = r.hostId === socket.id;
     r.players.delete(socket.id);
-    r.exposure.delete(socket.id);
     if (wasHost){
       const next = r.players.keys().next().value;
       r.hostId = next || null;
     }
+    // If game running and no players, tear down room
     if (r.phase !== PHASE.LOBBY && r.players.size === 0){
       if (r.tick) clearInterval(r.tick);
       rooms.delete(r.code);

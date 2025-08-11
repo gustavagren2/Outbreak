@@ -4,11 +4,11 @@
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>OUTBREAK</title>
-  <link rel="stylesheet" href="/style.css?v=7"/>
+  <link rel="stylesheet" href="/style.css?v=8"/>
 </head>
 <body>
-  <div class="app">
-    <!-- LOBBY (full screen, lobby-only) -->
+  <div class="app" id="app">
+    <!-- LOBBY -->
     <section id="lobby" class="grid-2 full">
       <div class="panel column">
         <div class="avatar-preview">
@@ -48,7 +48,7 @@
       </div>
     </section>
 
-    <!-- ROLE REVEAL (in-between view only) -->
+    <!-- ROLE REVEAL (in-between) -->
     <section id="reveal" class="center hidden">
       <canvas id="revealAvatar" width="120" height="120"></canvas>
       <h2 id="revealTitle">ROLE</h2>
@@ -57,18 +57,15 @@
       <div id="countdown" class="count-num">10s</div>
     </section>
 
-    <!-- GAME -->
+    <!-- GAME (fullscreen) -->
     <section id="game" class="hidden">
       <div class="hud top-left"><span id="roundText">Round 1 of 1</span></div>
       <div class="hud top-right"><span id="gameTimer">90</span> Seconds remaining</div>
       <div class="hud bottom-right"><span id="infectCount">0</span> Players infected</div>
-      <div class="hud bottom-left">
-        <div class="bar green"><div class="fill" id="timeBar" style="width:0%"></div></div>
-      </div>
-      <canvas id="gameCanvas" width="1100" height="620"></canvas>
+      <canvas id="gameCanvas" width="1600" height="900"></canvas>
     </section>
 
-    <!-- LEADERBOARD (between rounds only; final stays up) -->
+    <!-- LEADERBOARD (between and final) -->
     <section id="board" class="center hidden">
       <h2>LEADERBOARD</h2>
       <div id="boardRound" class="muted small">Round summary</div>
@@ -83,11 +80,27 @@
         </div>
         <div id="boardRows" class="tbody"></div>
       </div>
+
+      <!-- When final leaderboard: show chat + play again -->
+      <div id="finalExtras" class="board-extras hidden">
+        <div class="board-chat">
+          <div id="boardChatLog" class="log grow"></div>
+          <div class="row gap">
+            <input id="boardChatInput" placeholder="Type a message…"/>
+            <button id="boardChatSend">Send</button>
+          </div>
+        </div>
+        <div class="board-actions">
+          <button id="playAgainBtn">Play again</button>
+          <span class="muted small">(host only)</span>
+        </div>
+      </div>
+
       <div id="boardNext" class="muted small hidden">Next round in <span id="boardCountdown">—</span></div>
     </section>
   </div>
 
   <script src="/socket.io/socket.io.js"></script>
-  <script src="/app.js?v=7"></script>
+  <script src="/app.js?v=8"></script>
 </body>
 </html>
