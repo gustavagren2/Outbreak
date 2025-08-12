@@ -1,102 +1,89 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>OUTBREAK</title>
-  <link rel="stylesheet" href="/style.css?v=12"/>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Zombie Outbreak</title>
+  <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
-  <div class="app" id="app">
-    <!-- LOBBY -->
-    <section id="lobby" class="grid-2 full">
-      <div class="panel column">
-        <div class="avatar-preview">
-          <canvas id="avatarCanvas" width="160" height="160" title="Your character"></canvas>
-        </div>
+  <!-- Title -->
+  <header class="titlebar">
+    <h1><span class="zx">Zombie Outbreak</span> <span class="tag">v2</span></h1>
+    <button id="muteBtn" class="btn btn-ghost">Mute</button>
+  </header>
 
-        <label class="field">
-          <span>Select name</span>
-          <input id="nameInput" placeholder="Randomized"/>
-        </label>
+  <!-- LOBBY (pixel world) -->
+  <section id="lobby" class="panel">
+    <canvas id="lobbyCanvas" width="1600" height="540"></canvas>
 
-        <label class="field inline">
-          <input id="readyChk" type="checkbox"/> <span>Ready</span>
-        </label>
+    <!-- Bottom control bar -->
+    <div class="lobby-bar">
+      <div class="field">
+        <div class="picon-box"><canvas id="avatarCanvas" width="40" height="40"></canvas></div>
+        <input id="nameInput" class="input" placeholder="Character name" maxlength="16" />
+      </div>
+      <label class="btn-toggle">
+        <input id="readyChk" type="checkbox" />
+        <span>Ready</span>
+      </label>
 
-        <div class="divider"></div>
-        <ul id="playerList" class="list grow"></ul>
-
-        <div class="startbar">
-          <button id="startBtn" disabled>Start game</button>
-          <div id="readyCount" class="muted">0/0 players ready</div>
-        </div>
+      <div class="chatbox">
+        <input id="chatInput" class="input" placeholder="Write message" maxlength="160" />
+        <button id="chatSend" class="btn">Send</button>
       </div>
 
-      <div class="panel column">
-        <div id="chatLog" class="log grow"></div>
-        <div class="row gap">
-          <input id="chatInput" placeholder="Type a message…"/>
-          <button id="chatSend">Send</button>
-        </div>
+      <button id="startBtn" class="btn primary">Start game</button>
+      <div id="readyCount" class="muted"></div>
+    </div>
+  </section>
+
+  <!-- ROLE REVEAL -->
+  <section id="reveal" class="panel hidden">
+    <canvas id="revealAvatar" width="160" height="160"></canvas>
+    <h2 id="revealTitle"></h2>
+    <p id="revealText" class="muted"></p>
+    <div class="countdown">Game starting in <span id="countdown">10s</span></div>
+  </section>
+
+  <!-- GAME -->
+  <section id="game" class="panel hidden">
+    <div class="hud">
+      <div id="roundText" class="muted"></div>
+      <div id="gameTimer" class="muted"></div>
+      <div id="infectCount" class="muted"></div>
+      <div id="powerHUD" class="muted"></div>
+    </div>
+    <canvas id="gameCanvas" width="1600" height="900"></canvas>
+  </section>
+
+  <!-- LEADERBOARD -->
+  <section id="board" class="panel hidden">
+    <h2 id="boardRound">Leaderboard</h2>
+    <div class="table">
+      <div class="thead">
+        <div>Player</div><div class="t-right">Survival (s)</div><div class="t-right">Infections</div><div class="t-right">Bonus</div><div class="t-right">Round</div><div class="t-right">Total</div>
       </div>
-    </section>
+      <div id="boardRows" class="tbody"></div>
+    </div>
 
-    <!-- ROLE REVEAL -->
-    <section id="reveal" class="center hidden">
-      <canvas id="revealAvatar" width="120" height="120"></canvas>
-      <h2 id="revealTitle">ROLE</h2>
-      <p id="revealText" class="muted">Instructions.</p>
-      <div class="muted small">Game is starting in</div>
-      <div id="countdown" class="count-num">10s</div>
-    </section>
+    <div id="boardNext" class="muted">Next round in <span id="boardCountdown">5s</span></div>
 
-    <!-- GAME (fullscreen) -->
-    <section id="game" class="hidden">
-      <div class="hud top-left">
-        <span id="roundText">Round 1 of 1</span>
-        <div id="powerHUD" class="small muted"></div>
+    <div id="finalExtras" class="hidden">
+      <div class="rowline muted">Chat</div>
+      <div id="boardChatLog" class="chatlog"></div>
+      <div class="chatbox">
+        <input id="boardChatInput" class="input" placeholder="Write message" maxlength="160" />
+        <button id="boardChatSend" class="btn">Send</button>
       </div>
-      <div class="hud top-right"><span id="gameTimer">90</span> Seconds remaining</div>
-      <div class="hud bottom-right"><span id="infectCount">0</span> Players infected</div>
-      <canvas id="gameCanvas" width="1600" height="900"></canvas>
-    </section>
+      <button id="playAgainBtn" class="btn primary">Play again</button>
+    </div>
+  </section>
 
-    <!-- LEADERBOARD -->
-    <section id="board" class="center hidden">
-      <h2>LEADERBOARD</h2>
-      <div id="boardRound" class="muted small">Round summary</div>
-      <div class="table">
-        <div class="thead">
-          <div>Player</div>
-          <div class="t-right">Survival (s)</div>
-          <div class="t-right">Infected</div>
-          <div class="t-right">Bonus</div>
-          <div class="t-right">Round</div>
-          <div class="t-right">Total</div>
-        </div>
-        <div id="boardRows" class="tbody"></div>
-      </div>
-
-      <div id="finalExtras" class="board-extras hidden">
-        <div class="board-chat">
-          <div id="boardChatLog" class="log grow"></div>
-          <div class="row gap">
-            <input id="boardChatInput" placeholder="Type a message…"/>
-            <button id="boardChatSend">Send</button>
-          </div>
-        </div>
-        <div class="board-actions">
-          <button id="playAgainBtn">Play again</button>
-          <span class="muted small">(host only)</span>
-        </div>
-      </div>
-
-      <div id="boardNext" class="muted small hidden">Next round in <span id="boardCountdown">—</span></div>
-    </section>
-  </div>
+  <!-- hidden fallback for old code (safe no-op) -->
+  <ul id="playerList" class="hidden"></ul>
 
   <script src="/socket.io/socket.io.js"></script>
-  <script src="/app.js?v=12"></script>
+  <script src="/app.js"></script>
 </body>
 </html>
