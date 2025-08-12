@@ -21,7 +21,7 @@ let state = {
   round:0, totalRounds:0,
   players:[], world:{w:1600,h:900},
   countdownEndsAt:null, gameEndsAt:null, boardEndsAt:null,
-  powerups:[]
+  powerups:[], slimes:[]
 };
 
 // ---------- Sections & Refs ----------
@@ -57,7 +57,7 @@ function drawAvatarPreview(color){
   px(3,4,2,2,'#fff'); px(6,4,2,2,'#fff'); px(4,5,1,1,'#000'); px(7,5,1,1,'#000'); px(9,3,1,1,'#ffd27b');
 }
 
-// ---------- Tiny sprite for UI rows (cached data URLs) ----------
+// ---------- Tiny sprite for UI rows (cached) ----------
 const thumbCache = new Map();
 function makeThumb(color){
   if (thumbCache.has(color)) return thumbCache.get(color);
@@ -99,6 +99,15 @@ function sendDir(){
   const y = (keys['ArrowDown']||keys['s']||keys['S']?1:0) - (keys['ArrowUp']||keys['w']||keys['W']?1:0);
   socket.emit('input', { dir:{ x, y } });
 }
+
+// ---------- Space to use power (no repeats)
+addEventListener('keydown', e=>{
+  if (state.phase!=='GAME') return;
+  if ((e.key===' ' || e.code==='Space') && !e.repeat){
+    e.preventDefault();
+    socket.emit('use_power');
+  }
+}, { passive:false });
 
 // ---------- Sockets ----------
 socket.on('room_joined', ({ you, host })=>{ state.you=you; state.host=!!host; });
@@ -214,10 +223,13 @@ socket.on('chat_message', ({ from, avatar, text })=>{
   if (boardChatLog){ boardChatLog.appendChild(row); boardChatLog.scrollTop = boardChatLog.scrollHeight; }
 });
 
-// small SFX on infection or power-up
+// SFX + local flash indicator
+let youInfectedPrev = false;
+let flashUntil = 0; // screen flash
+const particles = []; // {x,y,vx,vy,life}
 socket.on('system_message', (m)=>{
   if (!m) return;
-  if (m.startsWith('infect:')) beep('infect');
+  if (m.startsWith('infect:')) { beep('infect'); flashUntil = performance.now()+280; }
   if (m.startsWith('power:'))  beep('power');
 });
 
@@ -228,7 +240,7 @@ const lastPos = new Map(); let animTime=0, stepPhase=0;
 
 addEventListener('keydown', e=>{ if(state.phase==='GAME' && (e.key===' '||e.code==='Space')){ e.preventDefault(); } }, { passive:false });
 
-socket.on('game_state', ({ phase, positions, round, totalRounds, gameEndsAt, powerups })=>{
+socket.on('game_state', ({ phase, positions, round, totalRounds, gameEndsAt, powerups, slimes })=>{
   if (phase!=='GAME' || !gctx) return;
 
   if (roundText) roundText.textContent = `Round ${round} of ${totalRounds}`;
@@ -237,22 +249,42 @@ socket.on('game_state', ({ phase, positions, round, totalRounds, gameEndsAt, pow
   if (infectCount) infectCount.textContent = positions.filter(p=>p.infected).length.toString();
 
   state.powerups = powerups || [];
+  state.slimes = slimes || [];
 
-  // power HUD (if you have speed)
+  // HUD: show next-to-use power (priority: speed > flash > slime)
   const me = positions.find(p=>p.id===state.you);
   if (powerHUD){
-    if (me && me.speedUntil && me.speedUntil > Date.now()){
-      const secs = Math.ceil((me.speedUntil - Date.now())/1000);
-      powerHUD.textContent = `Power: SPEED (${secs}s)`;
-    } else {
-      powerHUD.textContent = '';
-    }
+    if (me){
+      const activeSecs = (me.speedUntil && me.speedUntil > Date.now()) ? Math.ceil((me.speedUntil - Date.now())/1000) : 0;
+      const { flash=0, slime=0, speed=0 } = me.inv || {};
+      let label = '';
+      if (activeSecs) label = `Power: SPEED (${activeSecs}s)` + (speed?` +x${speed}`:'');
+      else if (speed>0) label = `Power: SPEED x${speed} — press Space`;
+      else if (flash>0) label = `Power: FLASH x${flash} — press Space`;
+      else if (slime>0) label = `Power: SLIME x${slime} — press Space`;
+      powerHUD.textContent = label;
+    } else powerHUD.textContent = '';
   }
 
-  drawGame(positions, state.powerups);
+  // detect new infections and spawn particles at their position
+  const prevInfected = new Map(lastPos); // reuse map for prev positions
+  positions.forEach(p=>{
+    const was = prevInfected.get('i:'+p.id);
+    const key = 'i:'+p.id;
+    // store current infected state on map
+    prevInfected.set(key, p.infected);
+  });
+
+  drawGame(positions, state.powerups, state.slimes);
 });
 
-function drawGame(positions, powerups){
+function pushBurst(x,y,color){
+  for (let i=0;i<14;i++){
+    particles.push({ x, y, vx:(Math.random()*2-1)*2, vy:(Math.random()*2-1)*2, life:350, color });
+  }
+}
+
+function drawGame(positions, powerups, slimes){
   const w=state.world.w, h=state.world.h;
   gctx.clearRect(0,0,w,h);
 
@@ -262,22 +294,37 @@ function drawGame(positions, powerups){
   // timing
   const now=performance.now(); const dt=(now-animTime)||16; animTime=now; stepPhase += dt*0.02;
 
-  // draw powerups first (little diamond)
+  // draw slimes first (dark green rectangles)
+  slimes.forEach(s=>{
+    gctx.fillStyle='rgba(0,255,0,0.12)';
+    gctx.strokeStyle='rgba(0,255,0,0.25)';
+    gctx.fillRect(s.x, s.y, s.w, s.h);
+    gctx.strokeRect(s.x, s.y, s.w, s.h);
+  });
+
+  // draw powerups (pixel-art icons)
   powerups.forEach(pu=>{
-    const x = Math.round(pu.x), y = Math.round(pu.y);
-    gctx.fillStyle='#fff'; gctx.strokeStyle='#aaa'; gctx.lineWidth=1;
-    gctx.beginPath();
-    gctx.moveTo(x, y-8); gctx.lineTo(x+8, y); gctx.lineTo(x, y+8); gctx.lineTo(x-8, y); gctx.closePath();
-    gctx.stroke(); gctx.fill();
+    drawPowerIcon(pu.type, Math.round(pu.x), Math.round(pu.y));
   });
 
   const infected = positions.filter(p=>p.infected);
   const healthy  = positions.filter(p=>!p.infected);
 
+  // detect local infection transition for flash/particles
+  const me = positions.find(p=>p.id===state.you);
+  if (me){
+    if (!youInfectedPrev && me.infected){
+      flashUntil = now+280;
+      pushBurst(me.x, me.y, '#00ff55');
+    }
+    youInfectedPrev = me.infected;
+  }
+
   positions.forEach(p=>{
-    const last=lastPos.get(p.id)||{x:p.x,y:p.y};
+    const last=lastPos.get(p.id)||{x:p.x,y:p.y,infected:p.infected};
     const moving=(Math.hypot(p.x-last.x,p.y-last.y)>0.5);
-    lastPos.set(p.id,{x:p.x,y:p.y});
+    if (!last.infected && p.infected){ pushBurst(p.x, p.y, '#00ff55'); }
+    lastPos.set(p.id,{x:p.x,y:p.y,infected:p.infected});
 
     // eye target
     let tx=p.x, ty=p.y-14;
@@ -296,11 +343,56 @@ function drawGame(positions, powerups){
       gctx.fillText('you', Math.round(p.x), Math.round(p.y)+38);
     }
   });
+
+  // particles
+  for (let i=particles.length-1;i>=0;i--){
+    const prt = particles[i];
+    prt.life -= dt;
+    prt.x += prt.vx; prt.y += prt.vy;
+    gctx.fillStyle = prt.color || '#fff';
+    gctx.fillRect(prt.x, prt.y, 2, 2);
+    if (prt.life<=0) particles.splice(i,1);
+  }
+
+  // infection flash overlay
+  if (flashUntil > now){
+    const a = Math.max(0, (flashUntil-now)/280) * 0.35;
+    gctx.fillStyle = `rgba(0,255,80,${a})`;
+    gctx.fillRect(0,0,w,h);
+  }
 }
 
-// Bigger sprite (~36px), with arms:
-// - Zombies: arms straight out forward.
-// - Citizens: flailing side arms (alternate with stepPhase).
+// Power-up icons (roughly matching your sketch)
+function drawPowerIcon(type, x, y){
+  gctx.imageSmoothingEnabled = false;
+  if (type==='flash'){ // BLUE teleport icon
+    gctx.fillStyle = '#04151f'; gctx.fillRect(x-16, y-22, 32, 44);
+    gctx.fillStyle = '#43b3ff';
+    gctx.fillRect(x-4, y-16, 8, 32);
+    gctx.fillRect(x-12, y-8, 8, 16);
+    gctx.fillRect(x+4, y-8, 8, 16);
+    gctx.fillStyle = '#9ad8ff';
+    gctx.fillRect(x-2, y-6, 4, 12);
+  } else if (type==='speed'){ // YELLOW lightning
+    gctx.fillStyle = '#1b1609'; gctx.fillRect(x-16, y-22, 32, 44);
+    gctx.fillStyle = '#ffc53d';
+    gctx.fillRect(x-4, y-16, 8, 8);
+    gctx.fillRect(x-12, y-8, 16, 8);
+    gctx.fillRect(x-4, y, 8, 8);
+    gctx.fillRect(x+4, y-20, 8, 8);
+    gctx.fillRect(x-12, y+12, 8, 8);
+  } else { // SLIME
+    gctx.fillStyle = '#071a08'; gctx.fillRect(x-16, y-22, 32, 44);
+    gctx.fillStyle = '#2bbd3a';
+    gctx.fillRect(x-6, y-12, 8, 8);
+    gctx.fillRect(x-2, y-4, 8, 8);
+    gctx.fillRect(x-10, y-4, 8, 8);
+    gctx.fillRect(x+4, y-12, 8, 8);
+    gctx.fillRect(x-2, y+4, 8, 8);
+  }
+}
+
+// Bigger sprite (~36px), with arms
 function drawMiniSprite(ctx, cx, cy, color, infected, moving, dt, tx, ty){
   const x0 = Math.round(cx) - 18;
   const y0 = Math.round(cy) - 18;

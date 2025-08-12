@@ -34,7 +34,12 @@ room = {
   options: {
     speed, contactDist, roundMs, countdownMs, boardMs, minPlayers,
     minSpawnFromP0,
-    powerups: { spawnIntervalMs, maxOnField, pickupDist, speedMs, speedMul }
+    powerups: {
+      spawnIntervalMs, maxOnField, pickupDist,
+      speedMs, speedMul,
+      flashDist,
+      slimeMs, slimeSlowMul, slimeLen, slimeThick
+    },
     points:{ survivalPerSec, perInfection, p0FullInfectBonus }
   },
   scores: Map<id, { total:number, infections:number, survivalMs:number }>,
@@ -42,9 +47,18 @@ room = {
   p0Queue: string[],
   powerups: Array<{id,type,x,y}>,
   nextPowerSpawn?: number,
-  puSeq?: number
+  puSeq?: number,
+  slimes: Array<{id,x,y,w,h,expiresAt}>,
+  slimeSeq?: number
 }
-Player = { id,name,avatar,ready,dir:{x,y},x,y,infected:boolean, speedUntil:number, round:{survivalMs:number,infections:number,isP0:boolean} }
+Player = {
+  id,name,avatar,ready,
+  dir:{x,y}, lastDir:{x,y},
+  x,y,infected:boolean,
+  speedUntil:number,
+  inv:{ flash:number, slime:number, speed:number },
+  round:{survivalMs:number,infections:number,isP0:boolean}
+}
 */
 
 const clamp = (v,min,max)=> v<min?min:v>max?max:v;
@@ -67,13 +81,15 @@ function ensureDefaultRoom(){
       countdownMs: 10_000,
       boardMs: 6000,
       minPlayers: 3,
-      minSpawnFromP0: 260,  // players won’t spawn closer than this to P0
+      minSpawnFromP0: 260,  // don’t spawn too close to P0
       powerups: {
         spawnIntervalMs: 12_000,
         maxOnField: 3,
         pickupDist: 24,
-        speedMs: 5000,
-        speedMul: 1.6
+        speedMs: 5000,   speedMul: 1.6,
+        flashDist: 260,
+        slimeMs: 4000,   slimeSlowMul: 0.45,
+        slimeLen: 160,   slimeThick: 26
       },
       points: {
         survivalPerSec: 1,
@@ -85,7 +101,9 @@ function ensureDefaultRoom(){
     p0Queue: [],
     powerups: [],
     nextPowerSpawn: 0,
-    puSeq: 0
+    puSeq: 0,
+    slimes: [],
+    slimeSeq: 0
   };
   rooms.set(DEFAULT_CODE, room);
   return room;
@@ -142,7 +160,9 @@ function broadcastRoom(room){
 }
 function broadcastGame(room){
   const positions = [...room.players.values()].map(p=>({
-    id:p.id, x:p.x, y:p.y, infected:p.infected, avatar:p.avatar, speedUntil:p.speedUntil||0
+    id:p.id, x:p.x, y:p.y, infected:p.infected, avatar:p.avatar,
+    speedUntil:p.speedUntil||0,
+    inv:{ flash:p.inv.flash, slime:p.inv.slime, speed:p.inv.speed }
   }));
   io.to(room.code).emit('game_state', {
     phase: room.phase,
@@ -150,7 +170,8 @@ function broadcastGame(room){
     round: room.round,
     totalRounds: room.totalRounds,
     gameEndsAt: room.gameEndsAt || null,
-    powerups: room.powerups
+    powerups: room.powerups,
+    slimes: room.slimes
   });
 }
 
@@ -182,16 +203,20 @@ function startNextRound(room){
   room.round += 1;
   if (room.round > room.totalRounds) return;
 
-  // clear powerups
+  // clear field objects
   room.powerups = [];
   room.puSeq = 0;
   room.nextPowerSpawn = 0;
+  room.slimes = [];
+  room.slimeSeq = 0;
 
   // reset per-round
   for (const p of room.players.values()){
     p.dir = { x:0, y:0 };
+    p.lastDir = { x:1, y:0 };
     p.infected = false;
     p.speedUntil = 0;
+    p.inv = { flash:0, slime:0, speed:0 };
     p.round = { survivalMs:0, infections:0, isP0:false };
   }
 
@@ -281,11 +306,26 @@ function endRound(room){
   }
 }
 
-/* --------------------------------- Tick -------------------------------- */
+/* ------------------------------ Tick -------------------------------- */
 function spawnPowerup(room){
   if (room.powerups.length >= room.options.powerups.maxOnField) return;
   const s = randomSpawn(room);
-  room.powerups.push({ id: ++room.puSeq, type:'speed', x:s.x, y:s.y });
+  // equal chance among three types
+  const types = ['flash','speed','slime'];
+  const type = types[(Math.random()*types.length)|0];
+  room.powerups.push({ id: ++room.puSeq, type, x:s.x, y:s.y });
+}
+
+function inSlime(room, x, y){
+  const now = Date.now();
+  let slow = 1;
+  for (const s of room.slimes){
+    if (now >= s.expiresAt) continue;
+    if (x >= s.x && x <= s.x + s.w && y >= s.y && y <= s.y + s.h){
+      slow *= room.options.powerups.slimeSlowMul;
+    }
+  }
+  return slow;
 }
 
 function tick(room, dtMs){
@@ -298,11 +338,22 @@ function tick(room, dtMs){
     room.nextPowerSpawn = Date.now() + room.options.powerups.spawnIntervalMs;
   }
 
+  // prune expired slimes
+  const now = Date.now();
+  room.slimes = room.slimes.filter(s => s.expiresAt > now);
+
   // integrate + survival
   for (const p of room.players.values()){
-    const mul = (p.speedUntil && p.speedUntil > Date.now()) ? room.options.powerups.speedMul : 1;
-    p.x = clamp(p.x + p.dir.x * base * mul * dt, 20, room.world.w-20);
-    p.y = clamp(p.y + p.dir.y * base * mul * dt, 20, room.world.h-20);
+    const speedMul = (p.speedUntil > now ? room.options.powerups.speedMul : 1) * inSlime(room, p.x, p.y);
+    const vx = (p.dir?.x||0) * base * speedMul * dt;
+    const vy = (p.dir?.y||0) * base * speedMul * dt;
+    if (vx || vy){
+      const len = Math.hypot(p.dir.x||0, p.dir.y||0) || 1;
+      p.lastDir.x = (p.dir.x||0)/len;
+      p.lastDir.y = (p.dir.y||0)/len;
+    }
+    p.x = clamp(p.x + vx, 20, room.world.w-20);
+    p.y = clamp(p.y + vy, 20, room.world.h-20);
     if (!p.infected) p.round.survivalMs += dtMs;
   }
 
@@ -323,7 +374,7 @@ function tick(room, dtMs){
     }
   }
 
-  // powerup pickup collisions (anyone can take)
+  // powerup pickup collisions
   for (let i=room.powerups.length-1; i>=0; i--){
     const pu = room.powerups[i];
     let pickedBy = null;
@@ -335,10 +386,10 @@ function tick(room, dtMs){
     }
     if (pickedBy){
       room.powerups.splice(i,1);
-      if (pu.type==='speed'){
-        pickedBy.speedUntil = Date.now() + room.options.powerups.speedMs;
-        io.to(room.code).emit('system_message', `power:speed:${pickedBy.name}`);
-      }
+      if (pu.type==='speed') pickedBy.inv.speed += 1;
+      if (pu.type==='flash') pickedBy.inv.flash += 1;
+      if (pu.type==='slime') pickedBy.inv.slime += 1;
+      io.to(room.code).emit('system_message', `power:${pu.type}:${pickedBy.name}`);
     }
   }
 
@@ -358,8 +409,10 @@ io.on('connection', (socket)=>{
   const avatarIdx = chooseUnusedAvatar(room);
   room.players.set(socket.id, {
     id: socket.id, name: 'PLAYER', avatar: avatarIdx, ready: false,
-    dir:{x:0,y:0}, x:spawn.x, y:spawn.y, infected:false,
+    dir:{x:0,y:0}, lastDir:{x:1,y:0},
+    x:spawn.x, y:spawn.y, infected:false,
     speedUntil: 0,
+    inv: { flash:0, slime:0, speed:0 },
     round:{survivalMs:0,infections:0,isP0:false}
   });
   if (!room.hostId) room.hostId = socket.id;
@@ -371,15 +424,6 @@ io.on('connection', (socket)=>{
   socket.on('set_name', ({ name })=>{
     const r = ensureDefaultRoom(); const p = r.players.get(socket.id); if (!p) return;
     p.name = String(name||'').slice(0,16) || p.name; broadcastRoom(r);
-  });
-
-  // colour selection removed; keep handler harmless if ever sent
-  socket.on('set_avatar', ({ avatar })=>{
-    const r = ensureDefaultRoom(); const p = r.players.get(socket.id); if (!p) return;
-    const idx = Math.max(0, Math.min(9, avatar|0));
-    const takenBy = [...r.players.values()].find(q => q.id !== p.id && (q.avatar|0) === idx);
-    if (takenBy){ socket.emit('error_message','color_taken'); sendRoomStateTo(socket.id, r); return; }
-    p.avatar = idx; broadcastRoom(r);
   });
 
   socket.on('set_ready', ({ ready })=>{
@@ -410,10 +454,46 @@ io.on('connection', (socket)=>{
     startGameSeries(r);
   });
 
+  socket.on('use_power', ()=>{
+    const r = ensureDefaultRoom(); if (r.phase !== PHASE.GAME) return;
+    const p = r.players.get(socket.id); if (!p) return;
+    const now = Date.now();
+
+    // priority: use SPEED if available (charges), else FLASH, else SLIME
+    if (p.inv.speed > 0){
+      p.inv.speed -= 1;
+      p.speedUntil = Math.max(p.speedUntil, now) + r.options.powerups.speedMs;
+      io.to(r.code).emit('system_message', `power:speed:${p.name}`);
+      return;
+    }
+    if (p.inv.flash > 0){
+      p.inv.flash -= 1;
+      const dir = (Math.abs(p.lastDir.x) + Math.abs(p.lastDir.y)) > 0.01 ? p.lastDir : {x:1,y:0};
+      const nx = clamp(p.x + dir.x * r.options.powerups.flashDist, 20, r.world.w - 20);
+      const ny = clamp(p.y + dir.y * r.options.powerups.flashDist, 20, r.world.h - 20);
+      p.x = nx; p.y = ny;
+      io.to(r.code).emit('system_message', `power:flash:${p.name}`);
+      return;
+    }
+    if (p.inv.slime > 0){
+      p.inv.slime -= 1;
+      const horizontal = Math.abs(p.lastDir.x) >= Math.abs(p.lastDir.y);
+      const len = r.options.powerups.slimeLen;
+      const thick = r.options.powerups.slimeThick;
+      const x = clamp(p.x - (horizontal ? len/2 : thick/2), 10, r.world.w-10);
+      const y = clamp(p.y - (horizontal ? thick/2 : len/2), 10, r.world.h-10);
+      const w = horizontal ? len : thick;
+      const h = horizontal ? thick : len;
+      r.slimes.push({ id: ++r.slimeSeq, x, y, w, h, expiresAt: now + r.options.powerups.slimeMs });
+      io.to(r.code).emit('system_message', `power:slime:${p.name}`);
+    }
+  });
+
   socket.on('input', ({ dir })=>{
     const r = ensureDefaultRoom(); if (r.phase !== PHASE.GAME) return;
     const p = r.players.get(socket.id); if (!p) return;
-    const x = Number(dir?.x)||0, y=Number(dir?.y)||0; const len = Math.hypot(x,y)||1;
+    const x = Number(dir?.x)||0, y=Number(dir?.y)||0;
+    const len = Math.hypot(x,y)||1;
     p.dir.x = x/len; p.dir.y = y/len;
   });
 
