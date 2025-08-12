@@ -19,7 +19,7 @@ server.listen(PORT, () => console.log('listening on :' + PORT));
 
 /* ---------------------------- Game State ---------------------------- */
 const PHASE = { LOBBY:'LOBBY', COUNTDOWN:'COUNTDOWN', GAME:'GAME', LEADERBOARD:'LEADERBOARD' };
-const DEFAULT_CODE = 'ROOM'; // single shared room
+const DEFAULT_CODE = 'ROOM';
 const PALETTE = [0,1,2,3,4,5,6,7,8,9];
 
 const rooms = new Map();
@@ -40,7 +40,7 @@ room = {
       flashDist,
       slimeMs, slimeSlowMul, slimeLen, slimeThick
     },
-    points:{ survivalPerSec, perInfection, p0FullInfectBonus }
+    walls: { countMin, countMax, thick, margin }
   },
   scores: Map<id, { total:number, infections:number, survivalMs:number }>,
   board?: Array,
@@ -49,7 +49,8 @@ room = {
   nextPowerSpawn?: number,
   puSeq?: number,
   slimes: Array<{id,x,y,w,h,expiresAt}>,
-  slimeSeq?: number
+  slimeSeq?: number,
+  walls: Array<{x,y,w,h}>
 }
 Player = {
   id,name,avatar,ready,
@@ -63,6 +64,7 @@ Player = {
 
 const clamp = (v,min,max)=> v<min?min:v>max?max:v;
 
+/* --------------------------- Room bootstrap --------------------------- */
 function ensureDefaultRoom(){
   let room = rooms.get(DEFAULT_CODE);
   if (room) return room;
@@ -75,13 +77,13 @@ function ensureDefaultRoom(){
     players: new Map(),
     world: { w: 1600, h: 900 },
     options: {
-      speed: 200,           // px/s base
-      contactDist: 22,      // collision distance (bigger chars)
+      speed: 200,
+      contactDist: 22,
       roundMs: 90_000,
       countdownMs: 10_000,
       boardMs: 6000,
       minPlayers: 3,
-      minSpawnFromP0: 260,  // don’t spawn too close to P0
+      minSpawnFromP0: 260,
       powerups: {
         spawnIntervalMs: 12_000,
         maxOnField: 3,
@@ -91,10 +93,11 @@ function ensureDefaultRoom(){
         slimeMs: 4000,   slimeSlowMul: 0.45,
         slimeLen: 160,   slimeThick: 26
       },
-      points: {
-        survivalPerSec: 1,
-        perInfection: 25,
-        p0FullInfectBonus: 50
+      walls: {
+        countMin: 5,
+        countMax: 9,
+        thick: 8,
+        margin: 70
       }
     },
     scores: new Map(),
@@ -103,15 +106,18 @@ function ensureDefaultRoom(){
     nextPowerSpawn: 0,
     puSeq: 0,
     slimes: [],
-    slimeSeq: 0
+    slimeSeq: 0,
+    walls: []
   };
   rooms.set(DEFAULT_CODE, room);
   return room;
 }
 
+/* ----------------------------- Utilities ----------------------------- */
 function randomSpawn(room){
   return { x: Math.random()*(room.world.w-140)+70, y: Math.random()*(room.world.h-140)+70 };
 }
+
 function usedAvatars(room){
   const s = new Set();
   for (const p of room.players.values()) s.add(p.avatar|0);
@@ -124,6 +130,47 @@ function chooseUnusedAvatar(room){
   return (Math.random()*PALETTE.length)|0; // fallback
 }
 
+const RADIUS = 18; // player half-size for collisions
+const rectsIntersect = (a,b)=> (a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y);
+const playerAABB = (x,y)=> ({ x:x-RADIUS, y:y-RADIUS, w:RADIUS*2, h:RADIUS*2 });
+
+function collidesWalls(room, x, y){
+  const box = playerAABB(x,y);
+  for (const r of room.walls){ if (rectsIntersect(box, r)) return true; }
+  return false;
+}
+function pointInWalls(room, x, y, pad=0){
+  const p = { x:x-pad, y:y-pad, w:pad*2, h:pad*2 };
+  for (const r of room.walls){ if (rectsIntersect(p, r)) return true; }
+  return false;
+}
+
+/* Move with axis separation & wall sliding */
+function moveWithCollisions(room, p, vx, vy, dt){
+  // X axis
+  let nx = clamp(p.x + vx, RADIUS, room.world.w - RADIUS);
+  if (collidesWalls(room, nx, p.y)) nx = p.x;
+  p.x = nx;
+
+  // Y axis
+  let ny = clamp(p.y + vy, RADIUS, room.world.h - RADIUS);
+  if (collidesWalls(room, p.x, ny)) ny = p.y;
+  p.y = ny;
+}
+
+/* Raycast-ish flash: step forward until next step would collide */
+function flashTo(room, p, dir, dist){
+  const steps = Math.ceil(dist/8);
+  let x = p.x, y = p.y;
+  for (let i=0;i<steps;i++){
+    const nx = clamp(x + dir.x*8, RADIUS, room.world.w - RADIUS);
+    const ny = clamp(y + dir.y*8, RADIUS, room.world.h - RADIUS);
+    if (collidesWalls(room, nx, ny)) break;
+    x = nx; y = ny;
+  }
+  return { x, y };
+}
+
 function publicPlayers(room){
   return [...room.players.values()].map(p=>({
     id:p.id, name:p.name, avatar:p.avatar, ready:p.ready
@@ -133,6 +180,7 @@ function publicPlayers(room){
 function sendRoomStateTo(socketId, room){
   io.to(socketId).emit('room_state', {
     code: room.code,
+    hostId: room.hostId,
     phase: room.phase,
     round: room.round,
     totalRounds: room.totalRounds,
@@ -147,6 +195,7 @@ function sendRoomStateTo(socketId, room){
 function broadcastRoom(room){
   io.to(room.code).emit('room_state', {
     code: room.code,
+    hostId: room.hostId,
     phase: room.phase,
     round: room.round,
     totalRounds: room.totalRounds,
@@ -171,20 +220,49 @@ function broadcastGame(room){
     totalRounds: room.totalRounds,
     gameEndsAt: room.gameEndsAt || null,
     powerups: room.powerups,
-    slimes: room.slimes
+    slimes: room.slimes,
+    walls: room.walls
   });
 }
 
-/* ------------------- Patient Zero rotation (twice each) ------------------- */
+/* ------------------- P0 rotation (twice per series) ------------------- */
 function buildP0Queue(room){
   const ids = [...room.players.keys()];
   const q = [];
-  ids.forEach(id => { q.push(id, id); }); // twice each
+  ids.forEach(id => { q.push(id, id); });
   for (let i=q.length-1;i>0;i--){
     const j=(Math.random()*(i+1))|0;
     [q[i], q[j]] = [q[j], q[i]];
   }
   room.p0Queue = q;
+}
+
+/* --------------------------- Wall generation --------------------------- */
+function genWalls(room){
+  const { w,h } = room.world;
+  const { thick, margin } = room.options.walls;
+  const count = ((room.options.walls.countMin + Math.random()*(room.options.walls.countMax - room.options.walls.countMin + 1))|0);
+
+  const walls = [];
+  let tries = 0;
+  while (walls.length < count && tries < count*20){
+    tries++;
+    const vertical = Math.random() < 0.5;
+    const len = vertical ? (180 + Math.random()*360) : (220 + Math.random()*420);
+    const t = thick;
+    const x = clamp(Math.random()*(w - len - margin*2) + margin, margin, w - margin);
+    const y = clamp(Math.random()*(h - len - margin*2) + margin, margin, h - margin);
+
+    const rect = vertical ? { x: Math.round(x), y: Math.round(y), w: t, h: Math.round(len) }
+                          : { x: Math.round(x), y: Math.round(y), w: Math.round(len), h: t };
+
+    // avoid near-duplicate overlaps so the map stays readable
+    const tooClose = walls.some(r=>rectsIntersect(
+      { x:rect.x-12, y:rect.y-12, w:rect.w+24, h:rect.h+24 }, r
+    ));
+    if (!tooClose) walls.push(rect);
+  }
+  room.walls = walls;
 }
 
 /* -------------------------------- Rounds -------------------------------- */
@@ -199,9 +277,17 @@ function startGameSeries(room){
   startNextRound(room);
 }
 
+function validSpawn(room, cand){
+  if (collidesWalls(room, cand.x, cand.y)) return false;
+  return true;
+}
+
 function startNextRound(room){
   room.round += 1;
   if (room.round > room.totalRounds) return;
+
+  // new arena dressing
+  genWalls(room);
 
   // clear field objects
   room.powerups = [];
@@ -220,7 +306,7 @@ function startNextRound(room){
     p.round = { survivalMs:0, infections:0, isP0:false };
   }
 
-  // pick P0 from queue (skip leavers)
+  // choose Patient Zero
   while (room.p0Queue.length && !room.players.has(room.p0Queue[0])) room.p0Queue.shift();
   let p0 = room.p0Queue.length ? room.p0Queue.shift() : null;
   if (!p0){
@@ -228,21 +314,25 @@ function startNextRound(room){
     p0 = ids[(Math.random()*ids.length)|0];
   }
 
-  // spawn P0 first
+  // spawn P0 first (avoid walls)
   const pz = room.players.get(p0);
-  const pzSpawn = randomSpawn(room);
+  let pzSpawn; for (let i=0;i<100;i++){ const c=randomSpawn(room); if (validSpawn(room,c)){ pzSpawn=c; break; } }
+  pzSpawn ||= { x: room.world.w/2, y: room.world.h/2 };
   pz.x = pzSpawn.x; pz.y = pzSpawn.y;
   pz.infected = true; pz.round.isP0 = true;
 
-  // spawn others, respecting min distance to P0
+  // spawn others, respecting distance to P0 and walls
+  const minD = room.options.minSpawnFromP0;
   for (const [id, p] of room.players){
     if (id === p0) continue;
     let s, tries=0;
-    const minD = room.options.minSpawnFromP0;
     do {
-      s = randomSpawn(room);
-      tries++;
-    } while (tries<50 && ((s.x-pz.x)*(s.x-pz.x) + (s.y-pz.y)*(s.y-pz.y)) < minD*minD);
+      s = randomSpawn(room); tries++;
+    } while (
+      tries < 80 &&
+      ( ((s.x-pz.x)**2 + (s.y-pz.y)**2) < minD*minD || !validSpawn(room, s) )
+    );
+    (s ||= { x: room.world.w/2, y: room.world.h/2 });
     p.x = s.x; p.y = s.y;
   }
 
@@ -306,11 +396,12 @@ function endRound(room){
   }
 }
 
-/* ------------------------------ Tick -------------------------------- */
+/* --------------------------------- Tick -------------------------------- */
 function spawnPowerup(room){
   if (room.powerups.length >= room.options.powerups.maxOnField) return;
-  const s = randomSpawn(room);
-  // equal chance among three types
+  // pick a free spot not inside a wall
+  let s; for (let i=0;i<80;i++){ const c=randomSpawn(room); if (!pointInWalls(room,c.x,c.y,10)){ s=c; break; } }
+  if (!s) return;
   const types = ['flash','speed','slime'];
   const type = types[(Math.random()*types.length)|0];
   room.powerups.push({ id: ++room.puSeq, type, x:s.x, y:s.y });
@@ -332,7 +423,7 @@ function tick(room, dtMs){
   if (room.phase !== PHASE.GAME) return;
   const dt = dtMs/1000, base = room.options.speed;
 
-  // maybe spawn a powerup
+  // spawn powerups
   if (Date.now() >= room.nextPowerSpawn){
     spawnPowerup(room);
     room.nextPowerSpawn = Date.now() + room.options.powerups.spawnIntervalMs;
@@ -342,7 +433,7 @@ function tick(room, dtMs){
   const now = Date.now();
   room.slimes = room.slimes.filter(s => s.expiresAt > now);
 
-  // integrate + survival
+  // integrate + survival with wall collisions
   for (const p of room.players.values()){
     const speedMul = (p.speedUntil > now ? room.options.powerups.speedMul : 1) * inSlime(room, p.x, p.y);
     const vx = (p.dir?.x||0) * base * speedMul * dt;
@@ -352,15 +443,13 @@ function tick(room, dtMs){
       p.lastDir.x = (p.dir.x||0)/len;
       p.lastDir.y = (p.dir.y||0)/len;
     }
-    p.x = clamp(p.x + vx, 20, room.world.w-20);
-    p.y = clamp(p.y + vy, 20, room.world.h-20);
+    moveWithCollisions(room, p, vx, vy, dtMs);
     if (!p.infected) p.round.survivalMs += dtMs;
   }
 
   // instant infection on contact
   const infected = [...room.players.values()].filter(p=>p.infected);
   const healthy  = [...room.players.values()].filter(p=>!p.infected);
-
   for (const h of healthy){
     let source = null;
     for (const z of infected){
@@ -374,7 +463,7 @@ function tick(room, dtMs){
     }
   }
 
-  // powerup pickup collisions
+  // powerup pickup
   for (let i=room.powerups.length-1; i>=0; i--){
     const pu = room.powerups[i];
     let pickedBy = null;
@@ -390,6 +479,7 @@ function tick(room, dtMs){
       if (pu.type==='flash') pickedBy.inv.flash += 1;
       if (pu.type==='slime') pickedBy.inv.slime += 1;
       io.to(room.code).emit('system_message', `power:${pu.type}:${pickedBy.name}`);
+      io.to(room.code).emit('power_event', { type:'pickup', puType:pu.type, x:pu.x, y:pu.y, id:pickedBy.id });
     }
   }
 
@@ -404,7 +494,6 @@ io.on('connection', (socket)=>{
   const room = ensureDefaultRoom();
   socket.join(room.code);
 
-  // add player with unique colour
   const spawn = randomSpawn(room);
   const avatarIdx = chooseUnusedAvatar(room);
   room.players.set(socket.id, {
@@ -417,7 +506,7 @@ io.on('connection', (socket)=>{
   });
   if (!room.hostId) room.hostId = socket.id;
 
-  socket.emit('room_joined', { code: room.code, you: socket.id, host: room.hostId===socket.id });
+  socket.emit('room_joined', { code: room.code, you: socket.id, hostId: room.hostId, host: room.hostId===socket.id });
   sendRoomStateTo(socket.id, room);
   broadcastRoom(room);
 
@@ -432,9 +521,8 @@ io.on('connection', (socket)=>{
   });
 
   socket.on('chat', ({ message })=>{
-    const r = ensureDefaultRoom();
-    if (!r) return;
-    if (r.phase === PHASE.GAME) return; // chat in lobby/board
+    const r = ensureDefaultRoom(); if (!r) return;
+    if (r.phase === PHASE.GAME) return;
     const p = r.players.get(socket.id); if (!p) return;
     io.to(r.code).emit('chat_message', { from:p.name, avatar:p.avatar|0, text:String(message||'').slice(0,300) });
   });
@@ -459,20 +547,22 @@ io.on('connection', (socket)=>{
     const p = r.players.get(socket.id); if (!p) return;
     const now = Date.now();
 
-    // priority: use SPEED if available (charges), else FLASH, else SLIME
+    // priority: SPEED → FLASH → SLIME
     if (p.inv.speed > 0){
       p.inv.speed -= 1;
       p.speedUntil = Math.max(p.speedUntil, now) + r.options.powerups.speedMs;
       io.to(r.code).emit('system_message', `power:speed:${p.name}`);
+      io.to(r.code).emit('power_event', { type:'speed', id:p.id, until:p.speedUntil });
       return;
     }
     if (p.inv.flash > 0){
+      const from = { x:p.x, y:p.y };
       p.inv.flash -= 1;
       const dir = (Math.abs(p.lastDir.x) + Math.abs(p.lastDir.y)) > 0.01 ? p.lastDir : {x:1,y:0};
-      const nx = clamp(p.x + dir.x * r.options.powerups.flashDist, 20, r.world.w - 20);
-      const ny = clamp(p.y + dir.y * r.options.powerups.flashDist, 20, r.world.h - 20);
-      p.x = nx; p.y = ny;
+      const end = flashTo(r, p, dir, r.options.powerups.flashDist);
+      p.x = end.x; p.y = end.y;
       io.to(r.code).emit('system_message', `power:flash:${p.name}`);
+      io.to(r.code).emit('power_event', { type:'flash', id:p.id, from, to:end });
       return;
     }
     if (p.inv.slime > 0){
@@ -484,8 +574,10 @@ io.on('connection', (socket)=>{
       const y = clamp(p.y - (horizontal ? thick/2 : len/2), 10, r.world.h-10);
       const w = horizontal ? len : thick;
       const h = horizontal ? thick : len;
-      r.slimes.push({ id: ++r.slimeSeq, x, y, w, h, expiresAt: now + r.options.powerups.slimeMs });
+      const slab = { id: ++r.slimeSeq, x, y, w, h, expiresAt: now + r.options.powerups.slimeMs };
+      r.slimes.push(slab);
       io.to(r.code).emit('system_message', `power:slime:${p.name}`);
+      io.to(r.code).emit('power_event', { type:'slime_place', id:p.id, rect: { x, y, w, h } });
     }
   });
 
