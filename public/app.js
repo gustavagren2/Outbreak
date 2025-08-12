@@ -1,3 +1,6 @@
+// Outbreak client — with linked soundtrack files (Option A x Option A)
+// Requires the two files in /public/audio/ : lobby_option_A.wav, game_option_A.wav
+
 // ---------- Helpers ----------
 const el = (id) => { const e = document.getElementById(id); if(!e) console.warn(`[UI] Missing #${id}`); return e; };
 function showPhaseSections(phase) {
@@ -37,18 +40,12 @@ const roundText = el('roundText'); const gameTimer = el('gameTimer'); const infe
 const boardRound = el('boardRound'); const boardRows = el('boardRows'); const boardNext = el('boardNext'); const boardCountdown = el('boardCountdown');
 const finalExtras = el('finalExtras'); const boardChatLog = el('boardChatLog'); const boardChatInput = el('boardChatInput'); const boardChatSend = el('boardChatSend'); const playAgainBtn = el('playAgainBtn');
 
-// ---------- Audio / SFX ----------
-let actx, unlocked=false;
-addEventListener('pointerdown', ()=>{ 
-  if(!unlocked){ 
-    actx = new (window.AudioContext||window.webkitAudioContext)(); 
-    unlocked=true; 
-    musicMaybeStart();     // start the correct loop after first tap/click
-  } 
-}, { once:true });
+// ---------- Audio / SFX (beeps + file-based soundtrack) ----------
+let actx, unlocked = false;
+let musicMuted = false, wantSong = 'lobby';
 
 const beep = (type='click')=>{
-  if (!unlocked) return;
+  if (!unlocked || !actx) return;
   const now = actx.currentTime, o = actx.createOscillator(), g = actx.createGain();
   o.type='square';
   const tones = { click:660, select:760, ready:520, start:880, tick:440, infect:180, power:980, score:620, error:200 };
@@ -57,171 +54,87 @@ const beep = (type='click')=>{
   o.connect(g); g.connect(actx.destination); o.start(now); o.stop(now+.13);
 };
 
-// ---------- Chiptune mini-engine ----------
-class Chip {
-  constructor(ctx){ this.ctx=ctx; this.timer=null; this.song=null; this.step=0; this.nextTime=0; this.muted=false; }
-  stop(){ if(this.timer){ clearInterval(this.timer); this.timer=null; } this.song=null; }
-  play(song){
-    if (!this.ctx) return;
-    this.stop();
-    this.song = song;
-    this.step = 0;
-    const spb = 60/song.bpm;               // seconds per beat (quarter)
-    this.stepDur = spb * (4 / song.div);   // div=16 -> 16th notes
-    this.nextTime = this.ctx.currentTime + 0.1;
-    const scheduleAhead = 0.25;
-    this.timer = setInterval(()=>{
-      while(this.nextTime < this.ctx.currentTime + scheduleAhead){
-        this.scheduleStep(this.nextTime);
-        this.nextTime += this.stepDur;
-        this.step++;
-      }
-    }, 30);
+class MusicPlayer {
+  constructor(lobbyUrl, gameUrl){
+    this.ctx=null;
+    this.urls={ lobby:lobbyUrl, game:gameUrl };
+    this.buffers={};
+    this.master=null;
+    this.current=null; // {name, src, gain}
   }
-  noteFreq(n){
-    if (!n || n==='-' || n==='.' || n==='R') return 0;
-    const m = /^([A-G])(#?)(-?\d)$/.exec(n.trim());
-    if (!m) return 0;
-    const map={C:0,D:2,E:4,F:5,G:7,A:9,B:11};
-    const semi = map[m[1]] + (m[2]?1:0);
-    const oct = parseInt(m[3],10);
-    const midi = semi + (oct+1)*12; // C-1 = 0
-    return 440 * Math.pow(2, (midi-69)/12); // A4=440
+  async unlock(){
+    if (this.ctx) return;
+    this.ctx = actx || new (window.AudioContext||window.webkitAudioContext)();
+    actx = this.ctx;
+    this.master = this.ctx.createGain();
+    this.master.gain.value = 0.9;
+    this.master.connect(this.ctx.destination);
+    // load both files
+    await Promise.all(['lobby','game'].map(async n=>{
+      const ab = await fetch(this.urls[n]).then(r=>r.arrayBuffer());
+      this.buffers[n] = await new Promise((res,rej)=>this.ctx.decodeAudioData(ab, res, rej));
+    }));
   }
-  env(g,t,peak=0.18,len=0.9){
-    const a=t, d=t+0.02, r=t+this.stepDur*len;
-    g.gain.setValueAtTime(0.0001,a);
-    g.gain.exponentialRampToValueAtTime(peak, a+0.01);
-    g.gain.exponentialRampToValueAtTime(0.0001, r);
-  }
-  playPulse(freq,t,vol=0.15){
-    if (!freq) return;
-    const o=this.ctx.createOscillator(), g=this.ctx.createGain();
-    o.type='square'; o.frequency.setValueAtTime(freq,t);
-    this.env(g,t,vol,0.85);
-    o.connect(g); g.connect(this.ctx.destination);
-    o.start(t); o.stop(t+this.stepDur*0.98);
-  }
-  playTri(freq,t,vol=0.18){
-    if (!freq) return;
-    const o=this.ctx.createOscillator(), g=this.ctx.createGain();
-    o.type='triangle'; o.frequency.setValueAtTime(freq,t);
-    this.env(g,t,vol,0.95);
-    o.connect(g); g.connect(this.ctx.destination);
-    o.start(t); o.stop(t+this.stepDur*0.98);
-  }
-  noiseBuffer(){
-    const len=0.1*this.ctx.sampleRate, buf=this.ctx.createBuffer(1,len,this.ctx.sampleRate), d=buf.getChannelData(0);
-    for(let i=0;i<len;i++) d[i]=Math.random()*2-1;
-    return buf;
-  }
-  playHat(t){
-    const s=this.ctx.createBufferSource(); s.buffer=this.noiseBuffer();
-    const bp=this.ctx.createBiquadFilter(); bp.type='highpass'; bp.frequency.value=8000; bp.Q.value=0.7;
-    const g=this.ctx.createGain(); this.env(g,t,0.08,0.4);
-    s.connect(bp); bp.connect(g); g.connect(this.ctx.destination);
-    s.start(t); s.stop(t+0.05);
-  }
-  playSnare(t){
-    const s=this.ctx.createBufferSource(); s.buffer=this.noiseBuffer();
-    const bp=this.ctx.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=2000; bp.Q.value=0.7;
-    const g=this.ctx.createGain(); this.env(g,t,0.16,0.5);
-    s.connect(bp); bp.connect(g); g.connect(this.ctx.destination);
-    s.start(t); s.stop(t+0.12);
-  }
-  playKick(t){
-    const o=this.ctx.createOscillator(), g=this.ctx.createGain();
-    o.type='triangle';
-    o.frequency.setValueAtTime(120,t);
-    o.frequency.exponentialRampToValueAtTime(55, t+0.12);
-    g.gain.setValueAtTime(0.25,t); g.gain.exponentialRampToValueAtTime(0.0001,t+0.15);
-    o.connect(g); g.connect(this.ctx.destination); o.start(t); o.stop(t+0.16);
-  }
-  scheduleStep(t){
-    if (!this.song) return;
-    const st = this.step;
-    for (const tr of this.song.tracks){
-      const pat = tr.pattern, tok = pat[st % pat.length];
-      if (tr.type==='pulse'){ this.playPulse(this.noteFreq(tok), t, tr.vol ?? 0.15); }
-      else if (tr.type==='triangle'){ this.playTri(this.noteFreq(tok), t, tr.vol ?? 0.18); }
-      else if (tr.type==='noise'){
-        if (tok==='h') this.playHat(t);
-        else if (tok==='s') this.playSnare(t);
-      } else if (tr.type==='kick'){
-        if (tok==='k') this.playKick(t);
-      }
+  play(name){
+    if (!this.ctx || musicMuted) return;
+    if (!this.buffers[name]) return;
+    if (this.current && this.current.name===name) return;
+
+    const fade=0.6, now=this.ctx.currentTime;
+    const src=this.ctx.createBufferSource(); src.buffer=this.buffers[name]; src.loop=true;
+    const g=this.ctx.createGain(); g.gain.setValueAtTime(0, now);
+    src.connect(g); g.connect(this.master);
+    src.start(now);
+
+    // fade in new
+    g.gain.linearRampToValueAtTime(1, now+fade);
+
+    // fade out old
+    if (this.current){
+      const old = this.current;
+      old.gain.gain.cancelScheduledValues(now);
+      old.gain.gain.setValueAtTime(old.gain.gain.value, now);
+      old.gain.gain.linearRampToValueAtTime(0, now+fade);
+      setTimeout(()=>{ try{ old.src.stop(); }catch{} }, fade*1000+40);
     }
+    this.current = { name, src, gain:g };
+  }
+  stop(){
+    if (!this.ctx || !this.current) return;
+    const now=this.ctx.currentTime;
+    this.current.gain.gain.cancelScheduledValues(now);
+    this.current.gain.gain.setValueAtTime(this.current.gain.gain.value, now);
+    this.current.gain.gain.linearRampToValueAtTime(0, now+0.25);
+    const s=this.current.src; setTimeout(()=>{ try{s.stop();}catch{} }, 320);
+    this.current=null;
   }
 }
 
-// Songs
-const lobbySong = {
-  bpm: 116, div: 16,
-  tracks: [
-    // lead (happy bounce)
-    { type:'pulse', vol:0.14, pattern:
-      ['E5','-','G5','-','C5','-','E5','-','G5','-','B4','-','D5','-','G4','-',
-       'E5','-','G5','-','C5','-','E5','-','A5','-','G5','-','E5','-','D5','-'] },
-    // counter
-    { type:'pulse', vol:0.12, pattern:
-      ['C5','-','-','-','D5','-','-','-','E5','-','-','-','G5','-','-','-',
-       'A5','-','-','-','G5','-','-','-','E5','-','-','-','D5','-','-','-'] },
-    // bass (I–V–vi–IV)
-    { type:'triangle', vol:0.22, pattern:
-      ['C3','C3','G2','G2','A2','A2','F2','F2','C3','C3','G2','G2','A2','A2','F2','F2'] },
-    // drums
-    { type:'kick', pattern:['k','.','.','.','k','.','.','.','k','.','.','.','k','.','.','.'] },
-    { type:'noise', pattern:['h','.','h','.','s','.','h','.','h','.','h','.','s','.','h','.'] }
-  ]
-};
+const music = new MusicPlayer('/audio/lobby_option_A.wav','/audio/game_option_A.wav');
 
-const gameSong = {
-  bpm: 150, div: 16,
-  tracks: [
-    // arpeggio lead
-    { type:'pulse', vol:0.14, pattern:
-      ['C6','-','G5','-','E5','-','C6','-','D6','-','A5','-','F5','-','D6','-',
-       'E6','-','B5','-','G5','-','E6','-','F6','-','C6','-','A5','-','F6','-'] },
-    // counter stab
-    { type:'pulse', vol:0.12, pattern:
-      ['-','-','C6','-','-','-','G5','-','-','-','D6','-','-','-','A5','-',
-       '-','-','E6','-','-','-','B5','-','-','-','F6','-','-','-','C6','-'] },
-    // driving bass
-    { type:'triangle', vol:0.22, pattern:
-      ['C3','C3','C3','C3','G2','G2','G2','G2','A2','A2','A2','A2','F2','F2','F2','F2'] },
-    // drums
-    { type:'kick', pattern:['k','.','.','.','k','.','.','.','k','.','.','.','k','.','.','.'] },
-    { type:'noise', pattern:['h','h','h','h','s','h','h','h','h','h','h','h','s','h','h','h'] }
-  ]
-};
+// First user interaction unlocks audio + starts lobby theme
+addEventListener('pointerdown', async ()=>{
+  if (unlocked) return;
+  unlocked = true;
+  actx = new (window.AudioContext||window.webkitAudioContext)();
+  await music.unlock();
+  music.play(wantSong);
+}, { once:true });
 
-// Music control
-let chip = null;
-let wantSong = 'lobby';    // which song should be playing given phase
-let musicMuted = false;
-
-function musicStart(name){
-  if (!unlocked) return;                       // will auto-start after first pointer
-  if (!actx) actx = new (window.AudioContext||window.webkitAudioContext)();
-  if (!chip) chip = new Chip(actx);
-  if (musicMuted) return;
-  chip.play(name==='game' ? gameSong : lobbySong);
-}
-function musicStop(){
-  if (chip) chip.stop();
-}
-function musicMaybeStart(){
-  musicStop();
-  musicStart(wantSong);
-}
-
-// Toggle with M
+// M to mute/unmute soundtrack (SFX beeps still play)
 addEventListener('keydown', e=>{
-  if ((e.key==='m' || e.key==='M') && !e.repeat){
+  if ((e.key==='m'||e.key==='M') && unlocked){
     musicMuted = !musicMuted;
-    if (musicMuted) musicStop(); else musicMaybeStart();
+    if (musicMuted) music.stop(); else music.play(wantSong);
   }
 });
+
+// helper the rest of the app calls when phase changes
+function musicMaybeStart(){
+  if (!unlocked) return;            // starts after first click/tap
+  if (musicMuted) return;
+  music.play(wantSong);
+}
 
 // ---------- Avatar preview (matches anatomy) ----------
 function drawAvatarPreview(color){
@@ -305,7 +218,7 @@ socket.on('room_state', (payload)=>{
 
   // music routing by phase
   if (phase==='GAME') { wantSong='game'; musicMaybeStart(); }
-  else if (phase==='LOBBY' || phase==='LEADERBOARD' || phase==='COUNTDOWN') { wantSong='lobby'; musicMaybeStart(); }
+  else { wantSong='lobby'; musicMaybeStart(); }
 
   state.hostId = hostId || null;
   state.host   = state.you && hostId && (state.you === hostId);
@@ -392,7 +305,7 @@ socket.on('role', ({ role })=>{
     const s = 12, ctx=rctx;
     const px=(x,y,w,h,c)=>{ ctx.fillStyle=c; ctx.fillRect(x*s,y*s,w*s,h*s); };
     ctx.clearRect(0,0,ctx.canvas.width,ctx.canvas.height);
-    // hat + body + arm nub + legs + foot + eyes (matches anatomy)
+    // hat + body + arm nub + legs + foot + eyes
     px(6,1,5,2,'#ffd966'); px(10,1,1,1,'#f5a43a');
     px(6,3,6,7,color); px(12,5,1,2,color);
     px(7,10,1,1,color); px(10,10,1,1,color); px(6,11,6,1,'#fff');
